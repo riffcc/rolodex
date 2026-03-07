@@ -292,16 +292,90 @@ async fn request_user_input_rejected_in_execute_mode_alias() -> anyhow::Result<(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn request_user_input_rejected_in_default_mode_by_default() -> anyhow::Result<()> {
-    assert_request_user_input_rejected("Default", |model| CollaborationMode {
-        mode: ModeKind::Default,
-        settings: Settings {
-            model,
-            reasoning_effort: None,
-            developer_instructions: None,
-        },
+async fn request_user_input_round_trip_in_default_mode_by_default() -> anyhow::Result<()> {
+    request_user_input_round_trip_for_mode(ModeKind::Default).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_user_input_rejected_in_default_mode_when_feature_disabled() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+
+    let builder = test_codex();
+    let TestCodex {
+        codex,
+        cwd,
+        session_configured,
+        ..
+    } = builder
+        .with_config(|config| {
+            let _ = config
+                .features
+                .disable(Feature::DefaultModeRequestUserInput);
+        })
+        .build(&server)
+        .await?;
+
+    let mode_name = "Default";
+    let mode_slug = mode_name.to_lowercase().replace(' ', "-");
+    let call_id = format!("user-input-{mode_slug}-call");
+    let request_args = json!({
+        "questions": [{
+            "id": "confirm_path",
+            "header": "Confirm",
+            "question": "Proceed with the plan?",
+            "options": [{
+                "label": "Yes (Recommended)",
+                "description": "Continue the current plan."
+            }, {
+                "label": "No",
+                "description": "Stop and revisit the approach."
+            }]
+        }]
     })
-    .await
+    .to_string();
+
+    let body = sse(vec![
+        ev_response_created("resp-1"),
+        ev_function_call(&call_id, "request_user_input", &request_args),
+        ev_completed("resp-1"),
+    ]);
+    let response_mock = responses::mount_sse_once(&server, body).await;
+
+    codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "please confirm".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_configured.model.clone(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: Some(CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: session_configured.model.clone(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            }),
+            personality: None,
+        })
+        .await?;
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let req = response_mock.single_request();
+    let (output, success) = call_output_content_and_success(&req, &call_id);
+    assert_eq!(success, None);
+    assert_eq!(output, "request_user_input is unavailable in Default mode");
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
