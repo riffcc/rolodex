@@ -466,3 +466,189 @@ async fn apply_patch_reports_parse_diagnostics() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edit_tool_applies_batched_operations() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::ApplyPatchFreeform)
+            .expect("test config should allow feature update");
+    });
+    let TestCodex {
+        codex,
+        cwd,
+        session_configured,
+        ..
+    } = builder.build(&server).await?;
+
+    let alpha = cwd.path().join("alpha.txt");
+    fs::write(&alpha, "hello\nworld\n")?;
+
+    let call_id = "edit-tool-success";
+    let edit_args = json!({
+        "operations": [
+            {
+                "op": "replace",
+                "path": "alpha.txt",
+                "old": "world",
+                "new": "team",
+                "expected_replacements": 1
+            },
+            {
+                "op": "insert_after",
+                "path": "alpha.txt",
+                "anchor": "hello\n",
+                "content": "there\n",
+                "expected_occurrences": 1
+            },
+            {
+                "op": "create",
+                "path": "beta.txt",
+                "content": "fresh\nfile\n"
+            }
+        ]
+    })
+    .to_string();
+
+    let first_response = sse(vec![
+        ev_response_created("resp-1"),
+        ev_function_call(call_id, "edit", &edit_args),
+        ev_completed("resp-1"),
+    ]);
+    responses::mount_sse_once(&server, first_response).await;
+
+    let second_response = sse(vec![
+        ev_assistant_message("msg-1", "edit complete"),
+        ev_completed("resp-2"),
+    ]);
+    let second_mock = responses::mount_sse_once(&server, second_response).await;
+
+    codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "please perform the structured edit".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_configured.model.clone(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let req = second_mock.single_request();
+    let (output_text, success_flag) = call_output(&req, call_id);
+    assert!(
+        output_text.contains("Success. Updated the following files:"),
+        "expected apply summary in output, got {output_text:?}"
+    );
+    assert!(
+        output_text.contains("M alpha.txt"),
+        "expected alpha.txt update in output, got {output_text:?}"
+    );
+    assert!(
+        output_text.contains("A beta.txt"),
+        "expected beta.txt add in output, got {output_text:?}"
+    );
+    assert_eq!(success_flag, Some(true));
+
+    assert_eq!(fs::read_to_string(&alpha)?, "hello\nthere\nteam\n");
+    assert_eq!(fs::read_to_string(cwd.path().join("beta.txt"))?, "fresh\nfile\n");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edit_tool_reports_match_guard_failures() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::ApplyPatchFreeform)
+            .expect("test config should allow feature update");
+    });
+    let TestCodex {
+        codex,
+        cwd,
+        session_configured,
+        ..
+    } = builder.build(&server).await?;
+
+    let alpha = cwd.path().join("alpha.txt");
+    fs::write(&alpha, "repeat repeat\n")?;
+
+    let call_id = "edit-tool-failure";
+    let edit_args = json!({
+        "operations": [
+            {
+                "op": "replace",
+                "path": "alpha.txt",
+                "old": "repeat",
+                "new": "done",
+                "expected_replacements": 1
+            }
+        ]
+    })
+    .to_string();
+
+    let first_response = sse(vec![
+        ev_response_created("resp-1"),
+        ev_function_call(call_id, "edit", &edit_args),
+        ev_completed("resp-1"),
+    ]);
+    responses::mount_sse_once(&server, first_response).await;
+
+    let second_response = sse(vec![
+        ev_assistant_message("msg-1", "edit failed"),
+        ev_completed("resp-2"),
+    ]);
+    let second_mock = responses::mount_sse_once(&server, second_response).await;
+
+    codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "please fail the structured edit".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_configured.model.clone(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let req = second_mock.single_request();
+    let (output_text, success_flag) = call_output(&req, call_id);
+    assert!(
+        output_text.contains("expected 1 matches but found 2"),
+        "expected edit guard failure in output, got {output_text:?}"
+    );
+    assert_eq!(success_flag, Some(false));
+    assert_eq!(fs::read_to_string(&alpha)?, "repeat repeat\n");
+
+    Ok(())
+}

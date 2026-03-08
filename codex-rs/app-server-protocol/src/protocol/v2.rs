@@ -904,6 +904,7 @@ impl From<CoreReviewDecision> for CommandExecutionApprovalDecision {
     fn from(value: CoreReviewDecision) -> Self {
         match value {
             CoreReviewDecision::Approved => Self::Accept,
+            CoreReviewDecision::ApprovedAdditionalPermissions { .. } => Self::Accept,
             CoreReviewDecision::ApprovedExecpolicyAmendment {
                 proposed_execpolicy_amendment,
             } => Self::AcceptWithExecpolicyAmendment {
@@ -5302,7 +5303,13 @@ pub struct ToolRequestUserInputQuestion {
     pub header: String,
     pub question: String,
     #[serde(default)]
+    pub allow_multiple: bool,
+    #[serde(default)]
     pub is_other: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_description: Option<String>,
     #[serde(default)]
     pub is_secret: bool,
     pub options: Option<Vec<ToolRequestUserInputOption>>,
@@ -5316,6 +5323,8 @@ pub struct ToolRequestUserInputParams {
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
+    #[serde(default)]
+    pub recursive: bool,
     pub questions: Vec<ToolRequestUserInputQuestion>,
 }
 

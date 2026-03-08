@@ -231,11 +231,31 @@ fn set_panic_hook() {
     }));
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum GamepadAction {
+    Up,
+    Down,
+    Left,
+    Right,
+    Confirm,
+    Submit,
+    Cancel,
+    Context,
+    Alternate,
+    PreviousPage,
+    NextPage,
+    FocusPrevious,
+    FocusNext,
+    PushToTalkStart,
+    PushToTalkStop,
+}
+
 #[derive(Clone, Debug)]
 pub enum TuiEvent {
     Key(KeyEvent),
     Paste(String),
     Draw,
+    Gamepad(GamepadAction),
 }
 
 pub struct Tui {

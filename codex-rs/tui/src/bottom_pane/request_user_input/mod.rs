@@ -44,8 +44,9 @@ const MIN_COMPOSER_HEIGHT: u16 = 3;
 const SELECT_OPTION_PLACEHOLDER: &str = "Select an option to add notes";
 pub(super) const TIP_SEPARATOR: &str = " | ";
 pub(super) const DESIRED_SPACERS_BETWEEN_SECTIONS: u16 = 2;
-const OTHER_OPTION_LABEL: &str = "None of the above";
-const OTHER_OPTION_DESCRIPTION: &str = "Optionally, add details in notes (tab).";
+const DEFAULT_OTHER_OPTION_LABEL: &str = "Other";
+const DEFAULT_OTHER_OPTION_DESCRIPTION: &str =
+    "Choose this to provide a custom answer. Start typing.";
 const UNANSWERED_CONFIRM_TITLE: &str = "Submit with unanswered questions?";
 const UNANSWERED_CONFIRM_GO_BACK: &str = "Go back";
 const UNANSWERED_CONFIRM_GO_BACK_DESC: &str = "Return to the first unanswered question.";
@@ -88,6 +89,8 @@ impl ComposerDraft {
 struct AnswerState {
     // Scrollable cursor state for option navigation/highlight.
     options_state: ScrollState,
+    // Committed selected option indices. Single-select questions keep at most one.
+    selected_indices: Vec<usize>,
     // Per-question notes draft.
     draft: ComposerDraft,
     // Whether the answer for this question has been explicitly submitted.
@@ -222,11 +225,55 @@ impl RequestUserInputOverlay {
     }
 
     fn selected_option_index(&self) -> Option<usize> {
-        if !self.has_options() {
-            return None;
-        }
+        self.current_answer()
+            .and_then(|answer| answer.selected_indices.first().copied())
+    }
+
+    fn focused_option_index(&self) -> Option<usize> {
         self.current_answer()
             .and_then(|answer| answer.options_state.selected_idx)
+    }
+
+    fn has_selected_option(&self) -> bool {
+        self.current_answer()
+            .is_some_and(|answer| !answer.selected_indices.is_empty())
+    }
+
+    fn current_question_allows_multiple(&self) -> bool {
+        self.current_question().is_some_and(|question| question.allow_multiple)
+    }
+
+    fn focused_option_is_other(&self) -> bool {
+        let Some(question) = self.current_question() else {
+            return false;
+        };
+        let Some(focused_idx) = self.focused_option_index() else {
+            return false;
+        };
+        let Some(options) = question.options.as_ref() else {
+            return false;
+        };
+        Self::other_option_enabled_for_question(question) && focused_idx == options.len()
+    }
+
+    fn other_option_label_for_question(
+        question: &codex_protocol::request_user_input::RequestUserInputQuestion,
+    ) -> &str {
+        question
+            .other_label
+            .as_deref()
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or(DEFAULT_OTHER_OPTION_LABEL)
+    }
+
+    fn other_option_description_for_question(
+        question: &codex_protocol::request_user_input::RequestUserInputQuestion,
+    ) -> &str {
+        question
+            .other_description
+            .as_deref()
+            .filter(|description| !description.trim().is_empty())
+            .unwrap_or(DEFAULT_OTHER_OPTION_DESCRIPTION)
     }
 
     fn notes_has_content(&self, idx: usize) -> bool {
@@ -271,16 +318,23 @@ impl RequestUserInputOverlay {
             .map(|(question, options)| {
                 let selected_idx = self
                     .current_answer()
-                    .and_then(|answer| answer.options_state.selected_idx);
+                    .map(|answer| answer.selected_indices.clone())
+                    .unwrap_or_default();
                 let mut rows = options
                     .iter()
                     .enumerate()
                     .map(|(idx, opt)| {
-                        let selected = selected_idx.is_some_and(|sel| sel == idx);
-                        let prefix = if selected { '›' } else { ' ' };
+                        let selected = selected_idx.contains(&idx);
+                        let prefix = if self.current_question_allows_multiple() {
+                            if selected { "› [x] " } else { "  [ ] " }
+                        } else if selected {
+                            "› "
+                        } else {
+                            "  "
+                        };
                         let label = opt.label.as_str();
                         let number = idx + 1;
-                        let prefix_label = format!("{prefix} {number}. ");
+                        let prefix_label = format!("{prefix}{number}. ");
                         let wrap_indent = UnicodeWidthStr::width(prefix_label.as_str());
                         GenericDisplayRow {
                             name: format!("{prefix_label}{label}"),
@@ -293,14 +347,25 @@ impl RequestUserInputOverlay {
 
                 if Self::other_option_enabled_for_question(question) {
                     let idx = options.len();
-                    let selected = selected_idx.is_some_and(|sel| sel == idx);
-                    let prefix = if selected { '›' } else { ' ' };
+                    let selected = selected_idx.contains(&idx);
+                    let prefix = if question.allow_multiple {
+                        if selected { "› [x] " } else { "  [ ] " }
+                    } else if selected {
+                        "› "
+                    } else {
+                        "  "
+                    };
                     let number = idx + 1;
-                    let prefix_label = format!("{prefix} {number}. ");
+                    let prefix_label = format!("{prefix}{number}. ");
                     let wrap_indent = UnicodeWidthStr::width(prefix_label.as_str());
                     rows.push(GenericDisplayRow {
-                        name: format!("{prefix_label}{OTHER_OPTION_LABEL}"),
-                        description: Some(OTHER_OPTION_DESCRIPTION.to_string()),
+                        name: format!(
+                            "{prefix_label}{}",
+                            Self::other_option_label_for_question(question)
+                        ),
+                        description: Some(
+                            Self::other_option_description_for_question(question).to_string(),
+                        ),
                         wrap_indent: Some(wrap_indent),
                         ..Default::default()
                     });
@@ -430,7 +495,9 @@ impl RequestUserInputOverlay {
         let mut tips = Vec::new();
         let notes_visible = self.notes_ui_visible();
         if self.has_options() {
-            if self.selected_option_index().is_some() && !notes_visible {
+            if self.focused_option_is_other() && !notes_visible {
+                tips.push(FooterTip::highlighted("type to answer"));
+            } else if self.selected_option_index().is_some() && !notes_visible {
                 tips.push(FooterTip::highlighted("tab to add notes"));
             }
             if self.selected_option_index().is_some() && notes_visible {
@@ -558,6 +625,7 @@ impl RequestUserInputOverlay {
                 }
                 AnswerState {
                     options_state,
+                    selected_indices: Vec::new(),
                     draft: ComposerDraft::default(),
                     answer_committed: false,
                     notes_visible: !has_options,
@@ -607,7 +675,7 @@ impl RequestUserInputOverlay {
             return options.get(idx).map(|opt| opt.label.clone());
         }
         if idx == options.len() && Self::other_option_enabled_for_question(question) {
-            return Some(OTHER_OPTION_LABEL.to_string());
+            return Some(Self::other_option_label_for_question(question).to_string());
         }
         None
     }
@@ -641,9 +709,57 @@ impl RequestUserInputOverlay {
             return;
         }
         let options_len = self.options_len();
+        let allow_multiple = self.current_question_allows_multiple();
         let updated = if let Some(answer) = self.current_answer_mut() {
             answer.options_state.clamp_selection(options_len);
+            if let Some(selected_idx) = answer.options_state.selected_idx {
+                if allow_multiple {
+                    if !answer.selected_indices.contains(&selected_idx) {
+                        answer.selected_indices.push(selected_idx);
+                        answer.selected_indices.sort_unstable();
+                    }
+                } else {
+                    answer.selected_indices.clear();
+                    answer.selected_indices.push(selected_idx);
+                }
+            }
             answer.answer_committed = committed;
+            true
+        } else {
+            false
+        };
+        if updated {
+            self.sync_composer_placeholder();
+        }
+    }
+
+    fn toggle_current_option(&mut self) {
+        if !self.has_options() {
+            return;
+        }
+        let options_len = self.options_len();
+        let allow_multiple = self.current_question_allows_multiple();
+        let updated = if let Some(answer) = self.current_answer_mut() {
+            answer.options_state.clamp_selection(options_len);
+            let Some(selected_idx) = answer.options_state.selected_idx else {
+                return;
+            };
+            if allow_multiple {
+                if let Some(existing) = answer
+                    .selected_indices
+                    .iter()
+                    .position(|idx| *idx == selected_idx)
+                {
+                    answer.selected_indices.remove(existing);
+                } else {
+                    answer.selected_indices.push(selected_idx);
+                    answer.selected_indices.sort_unstable();
+                }
+            } else {
+                answer.selected_indices.clear();
+                answer.selected_indices.push(selected_idx);
+            }
+            answer.answer_committed = !answer.selected_indices.is_empty();
             true
         } else {
             false
@@ -659,7 +775,8 @@ impl RequestUserInputOverlay {
             return;
         }
         if let Some(answer) = self.current_answer_mut() {
-            answer.options_state.reset();
+            answer.selected_indices.clear();
+            answer.options_state.selected_idx = Some(0);
             answer.draft = ComposerDraft::default();
             answer.answer_committed = false;
             answer.notes_visible = false;
@@ -690,6 +807,9 @@ impl RequestUserInputOverlay {
 
     /// Ensure there is a selection before allowing notes entry.
     fn ensure_selected_for_notes(&mut self) {
+        if !self.has_selected_option() {
+            self.select_current_option(false);
+        }
         if let Some(answer) = self.current_answer_mut() {
             answer.notes_visible = true;
         }
@@ -718,13 +838,14 @@ impl RequestUserInputOverlay {
         for (idx, question) in self.request.questions.iter().enumerate() {
             let answer_state = &self.answers[idx];
             let options = question.options.as_ref();
-            // For option questions we may still produce no selection.
-            let selected_idx =
-                if options.is_some_and(|opts| !opts.is_empty()) && answer_state.answer_committed {
-                    answer_state.options_state.selected_idx
-                } else {
-                    None
-                };
+            let selected_indices = if options.is_some_and(|opts| !opts.is_empty())
+                && (answer_state.answer_committed
+                    || (question.allow_multiple && !answer_state.selected_indices.is_empty()))
+            {
+                answer_state.selected_indices.clone()
+            } else {
+                Vec::new()
+            };
             // Notes are appended as extra answers. For freeform questions, only submit when
             // the user explicitly committed the draft.
             let notes = if answer_state.answer_committed {
@@ -732,9 +853,10 @@ impl RequestUserInputOverlay {
             } else {
                 String::new()
             };
-            let selected_label = selected_idx
-                .and_then(|selected_idx| Self::option_label_for_index(question, selected_idx));
-            let mut answer_list = selected_label.into_iter().collect::<Vec<_>>();
+            let mut answer_list = selected_indices
+                .into_iter()
+                .filter_map(|selected_idx| Self::option_label_for_index(question, selected_idx))
+                .collect::<Vec<_>>();
             if !notes.is_empty() {
                 answer_list.push(format!("user_note: {notes}"));
             }
@@ -846,7 +968,11 @@ impl RequestUserInputOverlay {
             .as_ref()
             .is_some_and(|options| !options.is_empty());
         if has_options {
-            answer.options_state.selected_idx.is_some() && answer.answer_committed
+            if question.allow_multiple {
+                !answer.selected_indices.is_empty()
+            } else {
+                !answer.selected_indices.is_empty() && answer.answer_committed
+            }
         } else {
             answer.answer_committed
         }
@@ -986,6 +1112,20 @@ impl RequestUserInputOverlay {
 }
 
 impl BottomPaneView for RequestUserInputOverlay {
+    fn view_id(&self) -> Option<&'static str> {
+        Some("request-user-input")
+    }
+
+    fn map_gamepad_action(&self, action: crate::tui::GamepadAction) -> Option<KeyCode> {
+        match action {
+            crate::tui::GamepadAction::Confirm => Some(KeyCode::Char(' ')),
+            crate::tui::GamepadAction::Submit | crate::tui::GamepadAction::Alternate => {
+                Some(KeyCode::Enter)
+            }
+            _ => None,
+        }
+    }
+
     fn prefer_esc_to_handle_key_event(&self) -> bool {
         true
     }
@@ -1105,20 +1245,26 @@ impl BottomPaneView for RequestUserInputOverlay {
                         }
                     }
                     KeyCode::Char(' ') => {
-                        self.select_current_option(true);
+                        if self.current_question_allows_multiple() {
+                            self.toggle_current_option();
+                        } else {
+                            self.select_current_option(true);
+                        }
                     }
                     KeyCode::Backspace | KeyCode::Delete => {
                         self.clear_selection();
                     }
                     KeyCode::Tab => {
-                        if self.selected_option_index().is_some() {
+                        if self.has_selected_option() {
                             self.focus = Focus::Notes;
                             self.ensure_selected_for_notes();
                         }
                     }
                     KeyCode::Enter => {
-                        let has_selection = self.selected_option_index().is_some();
-                        if has_selection {
+                        if !self.has_selected_option()
+                            && !self.current_question_allows_multiple()
+                            && self.question_count() == 1
+                        {
                             self.select_current_option(true);
                         }
                         self.go_next_or_submit();
@@ -1128,8 +1274,21 @@ impl BottomPaneView for RequestUserInputOverlay {
                             if let Some(answer) = self.current_answer_mut() {
                                 answer.options_state.selected_idx = Some(option_idx);
                             }
-                            self.select_current_option(true);
-                            self.go_next_or_submit();
+                            if self.current_question_allows_multiple() {
+                                self.toggle_current_option();
+                            } else {
+                                self.select_current_option(true);
+                                if self.question_count() == 1 {
+                                    self.go_next_or_submit();
+                                }
+                            }
+                        } else if self.focused_option_is_other() {
+                            self.focus = Focus::Notes;
+                            self.ensure_selected_for_notes();
+                            if let Some(answer) = self.current_answer_mut() {
+                                answer.answer_committed = false;
+                            }
+                            self.composer.insert_str(&ch.to_string());
                         }
                     }
                     _ => {}
@@ -1315,7 +1474,10 @@ mod tests {
             id: id.to_string(),
             header: header.to_string(),
             question: "Choose an option.".to_string(),
+            allow_multiple: false,
             is_other: false,
+            other_label: None,
+            other_description: None,
             is_secret: false,
             options: Some(vec![
                 RequestUserInputQuestionOption {
@@ -1339,7 +1501,10 @@ mod tests {
             id: id.to_string(),
             header: header.to_string(),
             question: "Choose an option.".to_string(),
+            allow_multiple: false,
             is_other: true,
+            other_label: None,
+            other_description: None,
             is_secret: false,
             options: Some(vec![
                 RequestUserInputQuestionOption {
@@ -1363,7 +1528,10 @@ mod tests {
             id: id.to_string(),
             header: header.to_string(),
             question: "Choose the next step for this task.".to_string(),
+            allow_multiple: false,
             is_other: false,
+            other_label: None,
+            other_description: None,
             is_secret: false,
             options: Some(vec![
                 RequestUserInputQuestionOption {
@@ -1393,7 +1561,10 @@ mod tests {
             id: id.to_string(),
             header: header.to_string(),
             question: "Choose one option.".to_string(),
+            allow_multiple: false,
             is_other: false,
+            other_label: None,
+            other_description: None,
             is_secret: false,
             options: Some(vec![
                 RequestUserInputQuestionOption {
@@ -1415,7 +1586,10 @@ mod tests {
             question:
                 "Choose one option; each hint is intentionally very long to test wrapped scrolling."
                     .to_string(),
+            allow_multiple: false,
             is_other: false,
+            other_label: None,
+            other_description: None,
             is_secret: false,
             options: Some(vec![
                 RequestUserInputQuestionOption {
@@ -1444,9 +1618,39 @@ mod tests {
             id: id.to_string(),
             header: header.to_string(),
             question: "Share details.".to_string(),
+            allow_multiple: false,
             is_other: false,
+            other_label: None,
+            other_description: None,
             is_secret: false,
             options: None,
+        }
+    }
+
+    fn question_with_multi_select(id: &str, header: &str) -> RequestUserInputQuestion {
+        RequestUserInputQuestion {
+            id: id.to_string(),
+            header: header.to_string(),
+            question: "Choose one or more options.".to_string(),
+            allow_multiple: true,
+            is_other: false,
+            other_label: None,
+            other_description: None,
+            is_secret: false,
+            options: Some(vec![
+                RequestUserInputQuestionOption {
+                    label: "Option 1".to_string(),
+                    description: "First choice.".to_string(),
+                },
+                RequestUserInputQuestionOption {
+                    label: "Option 2".to_string(),
+                    description: "Second choice.".to_string(),
+                },
+                RequestUserInputQuestionOption {
+                    label: "Option 3".to_string(),
+                    description: "Third choice.".to_string(),
+                },
+            ]),
         }
     }
 
@@ -1457,6 +1661,7 @@ mod tests {
         RequestUserInputEvent {
             call_id: "call-1".to_string(),
             turn_id: turn_id.to_string(),
+            recursive: false,
             questions,
         }
     }
@@ -1518,11 +1723,13 @@ mod tests {
         overlay.try_consume_user_input_request(RequestUserInputEvent {
             call_id: "call-2".to_string(),
             turn_id: "turn-2".to_string(),
+            recursive: false,
             questions: vec![question_with_options("q2", "Second")],
         });
         overlay.try_consume_user_input_request(RequestUserInputEvent {
             call_id: "call-3".to_string(),
             turn_id: "turn-3".to_string(),
+            recursive: false,
             questions: vec![question_with_options("q3", "Third")],
         });
 
@@ -1824,6 +2031,30 @@ mod tests {
         overlay.handle_key_event(KeyEvent::from(KeyCode::Tab));
         assert_eq!(overlay.notes_ui_visible(), true);
         assert!(matches!(overlay.focus, Focus::Notes));
+    }
+
+    #[test]
+    fn typing_on_highlighted_other_starts_custom_answer_immediately() {
+        let (tx, _rx) = test_sender();
+        let mut overlay = RequestUserInputOverlay::new(
+            request_event(
+                "turn-1",
+                vec![question_with_options_and_other("q1", "Pick one")],
+            ),
+            tx,
+            true,
+            false,
+            false,
+        );
+        let other_idx = overlay.options_len().saturating_sub(1);
+        let answer = overlay.current_answer_mut().expect("answer missing");
+        answer.options_state.selected_idx = Some(other_idx);
+
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Char('c')));
+
+        assert!(matches!(overlay.focus, Focus::Notes));
+        assert_eq!(overlay.selected_option_index(), Some(other_idx));
+        assert_eq!(overlay.composer.current_text(), "c");
     }
 
     #[test]
@@ -2337,7 +2568,7 @@ mod tests {
     }
 
     #[test]
-    fn is_other_adds_none_of_the_above_and_submits_it() {
+    fn is_other_adds_other_and_submits_it() {
         let (tx, mut rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
             request_event(
@@ -2351,11 +2582,11 @@ mod tests {
         );
 
         let rows = overlay.option_rows();
-        let other_row = rows.last().expect("expected none-of-the-above row");
-        assert_eq!(other_row.name, "  4. None of the above");
+        let other_row = rows.last().expect("expected other row");
+        assert_eq!(other_row.name, "  4. Other");
         assert_eq!(
             other_row.description.as_deref(),
-            Some(OTHER_OPTION_DESCRIPTION)
+            Some(DEFAULT_OTHER_OPTION_DESCRIPTION)
         );
 
         let other_idx = overlay.options_len().saturating_sub(1);
@@ -2383,7 +2614,7 @@ mod tests {
         assert_eq!(
             answer.answers,
             vec![
-                OTHER_OPTION_LABEL.to_string(),
+                DEFAULT_OTHER_OPTION_LABEL.to_string(),
                 "user_note: Custom answer".to_string(),
             ]
         );
@@ -2713,7 +2944,10 @@ mod tests {
                     id: "q1".to_string(),
                     header: "Next Step".to_string(),
                     question: "What would you like to do next?".to_string(),
+                    allow_multiple: false,
                     is_other: false,
+                    other_label: None,
+                    other_description: None,
                     is_secret: false,
                     options: Some(vec![
                         RequestUserInputQuestionOption {
@@ -2765,7 +2999,10 @@ mod tests {
                     id: "q1".to_string(),
                     header: "Next Step".to_string(),
                     question: "What would you like to do next?".to_string(),
+                    allow_multiple: false,
                     is_other: false,
+                    other_label: None,
+                    other_description: None,
                     is_secret: false,
                     options: Some(vec![
                         RequestUserInputQuestionOption {
@@ -2805,6 +3042,52 @@ mod tests {
             "request_user_input_hidden_options_footer",
             render_snapshot(&overlay, area)
         );
+    }
+
+    #[test]
+    fn multi_select_submission_includes_multiple_option_labels() {
+        let (tx, mut rx) = test_sender();
+        let mut overlay = RequestUserInputOverlay::new(
+            request_event("turn-1", vec![question_with_multi_select("q1", "Pick many")]),
+            tx,
+            true,
+            false,
+            false,
+        );
+
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Char(' ')));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Down));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Char(' ')));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+        let event = rx.try_recv().expect("expected user input answer");
+        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
+            panic!("expected Op::UserInputAnswer");
+        };
+        assert_eq!(
+            response.answers.get("q1"),
+            Some(&RequestUserInputAnswer {
+                answers: vec!["Option 1".to_string(), "Option 2".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn multi_select_counts_as_answered_once_any_option_is_selected() {
+        let (tx, _rx) = test_sender();
+        let mut overlay = RequestUserInputOverlay::new(
+            request_event("turn-1", vec![question_with_multi_select("q1", "Pick many")]),
+            tx,
+            true,
+            false,
+            false,
+        );
+
+        assert_eq!(overlay.unanswered_count(), 1);
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Char(' ')));
+
+        assert_eq!(overlay.unanswered_count(), 0);
+        assert!(overlay.is_question_answered(0, ""));
     }
 
     #[test]

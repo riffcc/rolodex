@@ -935,7 +935,6 @@ impl TextArea {
         id
     }
 
-    #[cfg(not(target_os = "linux"))]
     pub fn insert_named_element(&mut self, text: &str, id: String) {
         let start = self.clamp_pos_for_insertion(self.cursor_pos);
         self.insert_str_at(start, text);
@@ -1324,7 +1323,7 @@ impl TextArea {
 impl WidgetRef for &TextArea {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         let lines = self.wrapped_lines(area.width);
-        self.render_lines(area, buf, &lines, 0..lines.len());
+        self.render_lines(area, buf, &lines, 0..lines.len(), Style::default());
     }
 }
 
@@ -1338,17 +1337,17 @@ impl StatefulWidgetRef for &TextArea {
 
         let start = scroll as usize;
         let end = (scroll + area.height).min(lines.len() as u16) as usize;
-        self.render_lines(area, buf, &lines, start..end);
+        self.render_lines(area, buf, &lines, start..end, Style::default());
     }
 }
 
 impl TextArea {
-    pub(crate) fn render_ref_masked(
+    pub(crate) fn render_ref_styled(
         &self,
         area: Rect,
         buf: &mut Buffer,
         state: &mut TextAreaState,
-        mask_char: char,
+        base_style: Style,
     ) {
         let lines = self.wrapped_lines(area.width);
         let scroll = self.effective_scroll(area.height, &lines, state.scroll);
@@ -1356,7 +1355,34 @@ impl TextArea {
 
         let start = scroll as usize;
         let end = (scroll + area.height).min(lines.len() as u16) as usize;
-        self.render_lines_masked(area, buf, &lines, start..end, mask_char);
+        self.render_lines(area, buf, &lines, start..end, base_style);
+    }
+
+    pub(crate) fn render_ref_masked(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        state: &mut TextAreaState,
+        mask_char: char,
+    ) {
+        self.render_ref_masked_styled(area, buf, state, mask_char, Style::default());
+    }
+
+    pub(crate) fn render_ref_masked_styled(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        state: &mut TextAreaState,
+        mask_char: char,
+        base_style: Style,
+    ) {
+        let lines = self.wrapped_lines(area.width);
+        let scroll = self.effective_scroll(area.height, &lines, state.scroll);
+        state.scroll = scroll;
+
+        let start = scroll as usize;
+        let end = (scroll + area.height).min(lines.len() as u16) as usize;
+        self.render_lines_masked(area, buf, &lines, start..end, mask_char, base_style);
     }
 
     fn render_lines(
@@ -1365,13 +1391,13 @@ impl TextArea {
         buf: &mut Buffer,
         lines: &[Range<usize>],
         range: std::ops::Range<usize>,
+        base_style: Style,
     ) {
         for (row, idx) in range.enumerate() {
             let r = &lines[idx];
             let y = area.y + row as u16;
             let line_range = r.start..r.end - 1;
-            // Draw base line with default style.
-            buf.set_string(area.x, y, &self.text[line_range.clone()], Style::default());
+            buf.set_string(area.x, y, &self.text[line_range.clone()], base_style);
 
             // Overlay styled segments for elements that intersect this line.
             for elem in &self.elements {
@@ -1383,7 +1409,7 @@ impl TextArea {
                 }
                 let styled = &self.text[overlap_start..overlap_end];
                 let x_off = self.text[line_range.start..overlap_start].width() as u16;
-                let style = Style::default().fg(Color::Cyan);
+                let style = base_style.fg(Color::Cyan);
                 buf.set_string(area.x + x_off, y, styled, style);
             }
         }
@@ -1396,6 +1422,7 @@ impl TextArea {
         lines: &[Range<usize>],
         range: std::ops::Range<usize>,
         mask_char: char,
+        base_style: Style,
     ) {
         for (row, idx) in range.enumerate() {
             let r = &lines[idx];
@@ -1405,7 +1432,7 @@ impl TextArea {
                 .chars()
                 .map(|_| mask_char)
                 .collect::<String>();
-            buf.set_string(area.x, y, &masked, Style::default());
+            buf.set_string(area.x, y, &masked, base_style);
         }
     }
 }

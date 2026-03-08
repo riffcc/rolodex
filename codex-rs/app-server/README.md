@@ -867,6 +867,22 @@ UI guidance for IDEs: surface an approval dialog as soon as the request arrives.
 
 When the client responds to `item/tool/requestUserInput`, the server emits `serverRequest/resolved` with `{ threadId, requestId }`. If the pending request is cleared by turn start, turn completion, or turn interruption before the client answers, the server emits the same notification for that cleanup.
 
+Each question can optionally set `allowMultiple: true`. In that case, the client may return multiple selected labels for that question in the existing response shape:
+
+```json
+{
+  "answers": {
+    "question_id": {
+      "answers": ["First choice", "Second choice"]
+    }
+  }
+}
+```
+
+Questions that use the automatic free-form choice may optionally customize its copy with `otherLabel` and `otherDescription`, for example `Enter more details`.
+
+Option lists are not limited to tiny menus. Clients should use best judgment: keep questions concise when possible, but larger choice sets are valid when the decision actually needs them, up to 32 options.
+
 ### MCP server elicitations
 
 MCP servers can interrupt a turn and ask the client for structured input via `mcpServer/elicitation/request`.

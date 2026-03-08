@@ -73,6 +73,116 @@ async fn request_user_input_round_trip_resolves_pending() -> anyhow::Result<()> 
     request_user_input_round_trip_for_mode(ModeKind::Plan).await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_user_input_round_trip_supports_multi_select_answers() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let TestCodex {
+        codex,
+        cwd,
+        session_configured,
+        ..
+    } = test_codex().build(&server).await?;
+
+    let call_id = "user-input-multi-call";
+    let request_args = json!({
+        "questions": [{
+            "id": "next_steps",
+            "header": "Next",
+            "question": "Which follow-ups should we do?",
+            "allowMultiple": true,
+            "options": [{
+                "label": "Docs",
+                "description": "Document the behavior."
+            }, {
+                "label": "Tests",
+                "description": "Add regression coverage."
+            }, {
+                "label": "Ship",
+                "description": "Install the patched build."
+            }]
+        }]
+    })
+    .to_string();
+
+    let first_response = sse(vec![
+        ev_response_created("resp-1"),
+        ev_function_call(call_id, "request_user_input", &request_args),
+        ev_completed("resp-1"),
+    ]);
+    responses::mount_sse_once(&server, first_response).await;
+
+    let second_response = sse(vec![
+        ev_assistant_message("msg-1", "done"),
+        ev_completed("resp-2"),
+    ]);
+    let second_mock = responses::mount_sse_once(&server, second_response).await;
+
+    codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "ask for next steps".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_configured.model.clone(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: Some(CollaborationMode {
+                mode: ModeKind::Plan,
+                settings: Settings {
+                    model: session_configured.model.clone(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            }),
+            personality: None,
+        })
+        .await?;
+
+    let request = wait_for_event_match(&codex, |event| match event {
+        EventMsg::RequestUserInput(request) => Some(request.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(request.questions[0].allow_multiple);
+
+    let mut answers = HashMap::new();
+    answers.insert(
+        "next_steps".to_string(),
+        RequestUserInputAnswer {
+            answers: vec!["Docs".to_string(), "Ship".to_string()],
+        },
+    );
+    codex
+        .submit(Op::UserInputAnswer {
+            id: request.turn_id.clone(),
+            response: RequestUserInputResponse { answers },
+        })
+        .await?;
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let req = second_mock.single_request();
+    let output_text = call_output(&req, call_id);
+    let output_json: Value = serde_json::from_str(&output_text)?;
+    assert_eq!(
+        output_json,
+        json!({
+            "answers": {
+                "next_steps": { "answers": ["Docs", "Ship"] }
+            }
+        })
+    );
+
+    Ok(())
+}
+
 async fn request_user_input_round_trip_for_mode(mode: ModeKind) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 

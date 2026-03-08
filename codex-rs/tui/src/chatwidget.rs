@@ -49,6 +49,7 @@ use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
 use crate::text_formatting::proper_join;
+use crate::task_picker;
 use crate::version::CODEX_CLI_VERSION;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_backend_client::Client as BackendClient;
@@ -588,6 +589,8 @@ pub(crate) struct ChatWidget {
     unified_exec_wait_streak: Option<UnifiedExecWaitStreak>,
     turn_sleep_inhibitor: SleepInhibitor,
     task_complete_pending: bool,
+    task_picker_request_id: u64,
+    task_picker_action_cache: Vec<task_picker::TaskItem>,
     unified_exec_processes: Vec<UnifiedExecProcessSummary>,
     /// Tracks whether codex-core currently considers an agent turn to be in progress.
     ///
@@ -1417,6 +1420,13 @@ impl ChatWidget {
         let view = crate::bottom_pane::AppLinkView::new(params, self.app_event_tx.clone());
         self.bottom_pane.show_view(Box::new(view));
         self.request_redraw();
+    }
+
+    pub(crate) fn active_bottom_pane_gamepad_key(
+        &self,
+        action: crate::tui::GamepadAction,
+    ) -> Option<KeyCode> {
+        self.bottom_pane.active_view_gamepad_key(action)
     }
 
     pub(crate) fn open_feedback_consent(&mut self, category: crate::app_event::FeedbackCategory) {
@@ -3263,6 +3273,8 @@ impl ChatWidget {
             unified_exec_wait_streak: None,
             turn_sleep_inhibitor: SleepInhibitor::new(prevent_idle_sleep),
             task_complete_pending: false,
+            task_picker_request_id: 0,
+            task_picker_action_cache: Vec::new(),
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
@@ -3448,6 +3460,8 @@ impl ChatWidget {
             unified_exec_wait_streak: None,
             turn_sleep_inhibitor: SleepInhibitor::new(prevent_idle_sleep),
             task_complete_pending: false,
+            task_picker_request_id: 0,
+            task_picker_action_cache: Vec::new(),
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
@@ -3625,6 +3639,8 @@ impl ChatWidget {
             unified_exec_wait_streak: None,
             turn_sleep_inhibitor: SleepInhibitor::new(prevent_idle_sleep),
             task_complete_pending: false,
+            task_picker_request_id: 0,
+            task_picker_action_cache: Vec::new(),
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
@@ -4196,6 +4212,9 @@ impl ChatWidget {
             }
             SlashCommand::Skills => {
                 self.open_skills_menu();
+            }
+            SlashCommand::Tasks => {
+                self.open_task_picker();
             }
             SlashCommand::Status => {
                 self.add_status_output();
@@ -8549,6 +8568,103 @@ impl ChatWidget {
         });
     }
 
+    pub(crate) fn open_task_picker(&mut self) {
+        self.task_picker_request_id += 1;
+        let request_id = self.task_picker_request_id;
+        self.task_picker_action_cache.clear();
+
+        self.bottom_pane.show_view(Box::new(task_picker::TaskPickerView::loading(
+            self.app_event_tx.clone(),
+            "Loading Palace Plane tasks...".to_string(),
+        )));
+
+        let app_event_tx = self.app_event_tx.clone();
+        let cwd = self.config.cwd.clone();
+        tokio::spawn(async move {
+            let payload =
+                task_picker::load_task_picker_payload(cwd, task_picker::TaskPickerLoadTarget::Auto)
+                    .await;
+            app_event_tx.send(AppEvent::TaskPickerPayloadLoaded { request_id, payload });
+        });
+    }
+
+    pub(crate) fn load_task_picker_project(
+        &mut self,
+        workspace: String,
+        project_slug: String,
+        project_name: String,
+    ) {
+        self.task_picker_request_id += 1;
+        let request_id = self.task_picker_request_id;
+        self.task_picker_action_cache.clear();
+
+        self.bottom_pane.replace_view_if_active(
+            task_picker::TASKS_SELECTION_VIEW_ID,
+            Box::new(task_picker::TaskPickerView::loading(
+                self.app_event_tx.clone(),
+                format!("Loading {workspace}/{project_slug}..."),
+            )),
+        );
+
+        let app_event_tx = self.app_event_tx.clone();
+        let cwd = self.config.cwd.clone();
+        tokio::spawn(async move {
+            let payload = task_picker::load_task_picker_payload(
+                cwd,
+                task_picker::TaskPickerLoadTarget::Project {
+                    workspace,
+                    project_slug,
+                    project_name: Some(project_name),
+                },
+            )
+            .await;
+            app_event_tx.send(AppEvent::TaskPickerPayloadLoaded { request_id, payload });
+        });
+    }
+
+    pub(crate) fn apply_task_picker_payload(
+        &mut self,
+        request_id: u64,
+        payload: task_picker::TaskPickerPayload,
+    ) {
+        if request_id != self.task_picker_request_id {
+            return;
+        }
+
+        self.task_picker_action_cache = match &payload {
+            task_picker::TaskPickerPayload::TaskList { tasks, .. } => tasks
+                .iter()
+                .filter(|task| task.plane_issue_id.is_some())
+                .cloned()
+                .collect(),
+            task_picker::TaskPickerPayload::ProjectList { .. }
+            | task_picker::TaskPickerPayload::Error { .. } => Vec::new(),
+        };
+
+        let _ = self.bottom_pane.replace_view_if_active(
+            task_picker::TASKS_SELECTION_VIEW_ID,
+            Box::new(task_picker::TaskPickerView::from_payload(
+                self.app_event_tx.clone(),
+                payload,
+            )),
+        );
+    }
+
+    pub(crate) fn open_task_action_menu(&mut self, task_ids: Vec<String>) {
+        if let Some(params) = task_picker::task_action_menu_params(
+            &self.task_picker_action_cache,
+            &task_ids,
+            self.app_event_tx.clone(),
+        ) {
+            self.bottom_pane.show_selection_view(params);
+        } else {
+            self.add_info_message(
+                "No task actions are available for that selection.".to_string(),
+                None,
+            );
+        }
+    }
+
     pub(crate) async fn show_review_branch_picker(&mut self, cwd: &Path) {
         let branches = local_git_branches(cwd).await;
         let current_branch = current_branch_name(cwd)
@@ -8733,8 +8849,40 @@ impl ChatWidget {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 impl ChatWidget {
+    pub(crate) fn insert_transcription_placeholder(&mut self, text: &str) -> String {
+        let id = self.bottom_pane.insert_transcription_placeholder(text);
+        self.request_redraw();
+        id
+    }
+
+    pub(crate) fn composer_text(&self) -> String {
+        self.bottom_pane.composer_text()
+    }
+
+    pub(crate) fn show_voice_overlay(&mut self, header: String, details: Option<String>) {
+        if self.agent_turn_running {
+            self.add_info_message(header, details);
+            return;
+        }
+
+        self.bottom_pane.ensure_status_indicator();
+        self.bottom_pane.set_interrupt_hint_visible(false);
+        self.set_status(
+            header,
+            details,
+            StatusDetailsCapitalization::Preserve,
+            2,
+        );
+    }
+
+    pub(crate) fn hide_voice_overlay(&mut self) {
+        if !self.agent_turn_running {
+            self.bottom_pane.hide_status_indicator();
+            self.request_redraw();
+        }
+    }
+
     pub(crate) fn replace_transcription(&mut self, id: &str, text: &str) {
         self.bottom_pane.replace_transcription(id, text);
         // Ensure the UI redraws to reflect the updated transcription.
@@ -8752,6 +8900,19 @@ impl ChatWidget {
     pub(crate) fn remove_transcription_placeholder(&mut self, id: &str) {
         self.bottom_pane.remove_transcription_placeholder(id);
         // Ensure the UI redraws to reflect placeholder removal.
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_voice_visual_state(
+        &mut self,
+        state: crate::bottom_pane::VoiceVisualState,
+    ) {
+        self.bottom_pane.set_voice_visual_state(state);
+        self.request_redraw();
+    }
+
+    pub(crate) fn update_voice_visualizer(&mut self, visualizer: Option<String>) {
+        self.bottom_pane.update_voice_visualizer(visualizer);
         self.request_redraw();
     }
 }

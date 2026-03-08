@@ -32,7 +32,7 @@ use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ApplyPatchRequest {
     pub action: ApplyPatchAction,
     pub file_paths: Vec<AbsolutePathBuf>,

@@ -8,6 +8,8 @@ use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::list_selection_view::ListSelectionView;
 use crate::bottom_pane::list_selection_view::SelectionItem;
 use crate::bottom_pane::list_selection_view::SelectionViewParams;
+use crate::bottom_pane::multi_select_picker::MultiSelectItem;
+use crate::bottom_pane::multi_select_picker::MultiSelectPicker;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell;
@@ -16,11 +18,11 @@ use crate::key_hint::KeyBinding;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
+use crate::tui::GamepadAction;
 use codex_core::features::Features;
 use codex_protocol::ThreadId;
 use codex_protocol::mcp::RequestId;
 use codex_protocol::models::MacOsAutomationPermission;
-use codex_protocol::models::MacOsContactsPermission;
 use codex_protocol::models::MacOsPreferencesPermission;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::ElicitationAction;
@@ -29,7 +31,7 @@ use codex_protocol::protocol::NetworkApprovalContext;
 use codex_protocol::protocol::NetworkPolicyRuleAction;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
-use codex_protocol::request_permissions::PermissionGrantScope;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -41,6 +43,11 @@ use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
+
+enum ApprovalInteractionView {
+    List(ListSelectionView),
+    PermissionPicker(MultiSelectPicker),
+}
 
 /// Request coming from the agent that needs user approval.
 #[derive(Clone, Debug)]
@@ -54,13 +61,6 @@ pub(crate) enum ApprovalRequest {
         available_decisions: Vec<ReviewDecision>,
         network_approval_context: Option<NetworkApprovalContext>,
         additional_permissions: Option<PermissionProfile>,
-    },
-    Permissions {
-        thread_id: ThreadId,
-        thread_label: Option<String>,
-        call_id: String,
-        reason: Option<String>,
-        permissions: PermissionProfile,
     },
     ApplyPatch {
         thread_id: ThreadId,
@@ -83,7 +83,6 @@ impl ApprovalRequest {
     fn thread_id(&self) -> ThreadId {
         match self {
             ApprovalRequest::Exec { thread_id, .. }
-            | ApprovalRequest::Permissions { thread_id, .. }
             | ApprovalRequest::ApplyPatch { thread_id, .. }
             | ApprovalRequest::McpElicitation { thread_id, .. } => *thread_id,
         }
@@ -92,7 +91,6 @@ impl ApprovalRequest {
     fn thread_label(&self) -> Option<&str> {
         match self {
             ApprovalRequest::Exec { thread_label, .. }
-            | ApprovalRequest::Permissions { thread_label, .. }
             | ApprovalRequest::ApplyPatch { thread_label, .. }
             | ApprovalRequest::McpElicitation { thread_label, .. } => thread_label.as_deref(),
         }
@@ -104,7 +102,7 @@ pub(crate) struct ApprovalOverlay {
     current_request: Option<ApprovalRequest>,
     queue: Vec<ApprovalRequest>,
     app_event_tx: AppEventSender,
-    list: ListSelectionView,
+    interaction_view: ApprovalInteractionView,
     options: Vec<ApprovalOption>,
     current_complete: bool,
     done: bool,
@@ -117,7 +115,10 @@ impl ApprovalOverlay {
             current_request: None,
             queue: Vec::new(),
             app_event_tx: app_event_tx.clone(),
-            list: ListSelectionView::new(Default::default(), app_event_tx),
+            interaction_view: ApprovalInteractionView::List(ListSelectionView::new(
+                Default::default(),
+                app_event_tx,
+            )),
             options: Vec::new(),
             current_complete: false,
             done: false,
@@ -134,17 +135,27 @@ impl ApprovalOverlay {
     fn set_current(&mut self, request: ApprovalRequest) {
         self.current_complete = false;
         let header = build_header(&request);
-        let (options, params) = Self::build_options(&request, header, &self.features);
+        let (options, interaction_view) = Self::build_interaction_view(
+            &request,
+            header,
+            &self.features,
+            self.app_event_tx.clone(),
+        );
         self.current_request = Some(request);
         self.options = options;
-        self.list = ListSelectionView::new(params, self.app_event_tx.clone());
+        self.interaction_view = interaction_view;
     }
 
-    fn build_options(
+    fn build_interaction_view(
         request: &ApprovalRequest,
         header: Box<dyn Renderable>,
         _features: &Features,
-    ) -> (Vec<ApprovalOption>, SelectionViewParams) {
+        app_event_tx: AppEventSender,
+    ) -> (Vec<ApprovalOption>, ApprovalInteractionView) {
+        if let Some(picker) = build_permission_picker(request, app_event_tx.clone()) {
+            return (Vec::new(), ApprovalInteractionView::PermissionPicker(picker));
+        }
+
         let (options, title) = match request {
             ApprovalRequest::Exec {
                 available_decisions,
@@ -166,10 +177,6 @@ impl ApprovalOverlay {
                         )
                     },
                 ),
-            ),
-            ApprovalRequest::Permissions { .. } => (
-                permissions_options(),
-                "Would you like to grant these permissions?".to_string(),
             ),
             ApprovalRequest::ApplyPatch { .. } => (
                 patch_options(),
@@ -206,7 +213,7 @@ impl ApprovalOverlay {
             ..Default::default()
         };
 
-        (options, params)
+        (options, ApprovalInteractionView::List(ListSelectionView::new(params, app_event_tx)))
     }
 
     fn apply_selection(&mut self, actual_idx: usize) {
@@ -221,14 +228,6 @@ impl ApprovalOverlay {
                 (ApprovalRequest::Exec { id, command, .. }, ApprovalDecision::Review(decision)) => {
                     self.handle_exec_decision(id, command, decision.clone());
                 }
-                (
-                    ApprovalRequest::Permissions {
-                        call_id,
-                        permissions,
-                        ..
-                    },
-                    ApprovalDecision::Review(decision),
-                ) => self.handle_permissions_decision(call_id, permissions, decision.clone()),
                 (ApprovalRequest::ApplyPatch { id, .. }, ApprovalDecision::Review(decision)) => {
                     self.handle_patch_decision(id, decision.clone());
                 }
@@ -265,51 +264,6 @@ impl ApprovalOverlay {
                 id: id.to_string(),
                 turn_id: None,
                 decision,
-            },
-        });
-    }
-
-    fn handle_permissions_decision(
-        &self,
-        call_id: &str,
-        permissions: &PermissionProfile,
-        decision: ReviewDecision,
-    ) {
-        let Some(request) = self.current_request.as_ref() else {
-            return;
-        };
-        let granted_permissions = match decision {
-            ReviewDecision::Approved | ReviewDecision::ApprovedForSession => permissions.clone(),
-            ReviewDecision::Denied | ReviewDecision::Abort => Default::default(),
-            ReviewDecision::ApprovedExecpolicyAmendment { .. }
-            | ReviewDecision::NetworkPolicyAmendment { .. } => Default::default(),
-        };
-        let scope = if matches!(decision, ReviewDecision::ApprovedForSession) {
-            PermissionGrantScope::Session
-        } else {
-            PermissionGrantScope::Turn
-        };
-        if request.thread_label().is_none() {
-            let message = if granted_permissions.is_empty() {
-                "You did not grant additional permissions"
-            } else if matches!(scope, PermissionGrantScope::Session) {
-                "You granted additional permissions for this session"
-            } else {
-                "You granted additional permissions"
-            };
-            self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                crate::history_cell::PlainHistoryCell::new(vec![message.into()]),
-            )));
-        }
-        let thread_id = request.thread_id();
-        self.app_event_tx.send(AppEvent::SubmitThreadOp {
-            thread_id,
-            op: Op::RequestPermissionsResponse {
-                id: call_id.to_string(),
-                response: codex_protocol::request_permissions::RequestPermissionsResponse {
-                    permissions: granted_permissions,
-                    scope,
-                },
             },
         });
     }
@@ -398,15 +352,20 @@ impl ApprovalOverlay {
                 }
             }
             e => {
-                if let Some(idx) = self
-                    .options
-                    .iter()
-                    .position(|opt| opt.shortcuts().any(|s| s.is_press(*e)))
-                {
-                    self.apply_selection(idx);
-                    true
-                } else {
-                    false
+                match &self.interaction_view {
+                    ApprovalInteractionView::List(_) => {
+                        if let Some(idx) = self
+                            .options
+                            .iter()
+                            .position(|opt| opt.shortcuts().any(|s| s.is_press(*e)))
+                        {
+                            self.apply_selection(idx);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    ApprovalInteractionView::PermissionPicker(_) => false,
                 }
             }
         }
@@ -418,9 +377,47 @@ impl BottomPaneView for ApprovalOverlay {
         if self.try_handle_shortcut(&key_event) {
             return;
         }
-        self.list.handle_key_event(key_event);
-        if let Some(idx) = self.list.take_last_selected_index() {
-            self.apply_selection(idx);
+        match &mut self.interaction_view {
+            ApprovalInteractionView::List(list) => {
+                list.handle_key_event(key_event);
+                if let Some(idx) = list.take_last_selected_index() {
+                    self.apply_selection(idx);
+                }
+            }
+            ApprovalInteractionView::PermissionPicker(picker) => {
+                let mapped = match key_event {
+                    KeyEvent {
+                        kind: KeyEventKind::Press,
+                        code: KeyCode::Char('a'),
+                        modifiers: KeyModifiers::NONE,
+                        ..
+                    } => KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                    KeyEvent {
+                        kind: KeyEventKind::Press,
+                        code: KeyCode::Char('y'),
+                        modifiers: KeyModifiers::NONE,
+                        ..
+                    } => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                    other => other,
+                };
+                picker.handle_key_event(mapped);
+                if picker.is_complete() {
+                    self.current_complete = true;
+                    self.advance_queue();
+                }
+            }
+        }
+    }
+
+    fn map_gamepad_action(&self, action: GamepadAction) -> Option<KeyCode> {
+        match &self.interaction_view {
+            ApprovalInteractionView::List(_) => None,
+            ApprovalInteractionView::PermissionPicker(_) => match action {
+                GamepadAction::Confirm => Some(KeyCode::Char('a')),
+                GamepadAction::Submit => Some(KeyCode::Char('y')),
+                GamepadAction::Alternate => Some(KeyCode::Char('x')),
+                _ => None,
+            },
         }
     }
 
@@ -434,13 +431,6 @@ impl BottomPaneView for ApprovalOverlay {
             match request {
                 ApprovalRequest::Exec { id, command, .. } => {
                     self.handle_exec_decision(id, command, ReviewDecision::Abort);
-                }
-                ApprovalRequest::Permissions {
-                    call_id,
-                    permissions,
-                    ..
-                } => {
-                    self.handle_permissions_decision(call_id, permissions, ReviewDecision::Abort);
                 }
                 ApprovalRequest::ApplyPatch { id, .. } => {
                     self.handle_patch_decision(id, ReviewDecision::Abort);
@@ -478,15 +468,24 @@ impl BottomPaneView for ApprovalOverlay {
 
 impl Renderable for ApprovalOverlay {
     fn desired_height(&self, width: u16) -> u16 {
-        self.list.desired_height(width)
+        match &self.interaction_view {
+            ApprovalInteractionView::List(list) => list.desired_height(width),
+            ApprovalInteractionView::PermissionPicker(picker) => picker.desired_height(width),
+        }
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        self.list.render(area, buf);
+        match &self.interaction_view {
+            ApprovalInteractionView::List(list) => list.render(area, buf),
+            ApprovalInteractionView::PermissionPicker(picker) => picker.render(area, buf),
+        }
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        self.list.cursor_pos(area)
+        match &self.interaction_view {
+            ApprovalInteractionView::List(list) => list.cursor_pos(area),
+            ApprovalInteractionView::PermissionPicker(picker) => picker.cursor_pos(area),
+        }
     }
 }
 
@@ -546,32 +545,6 @@ fn build_header(request: &ApprovalRequest) -> Box<dyn Renderable> {
             }
             if network_approval_context.is_none() {
                 header.extend(full_cmd_lines);
-            }
-            Box::new(Paragraph::new(header).wrap(Wrap { trim: false }))
-        }
-        ApprovalRequest::Permissions {
-            thread_label,
-            reason,
-            permissions,
-            ..
-        } => {
-            let mut header: Vec<Line<'static>> = Vec::new();
-            if let Some(thread_label) = thread_label {
-                header.push(Line::from(vec![
-                    "Thread: ".into(),
-                    thread_label.clone().bold(),
-                ]));
-                header.push(Line::from(""));
-            }
-            if let Some(reason) = reason {
-                header.push(Line::from(vec!["Reason: ".into(), reason.clone().italic()]));
-                header.push(Line::from(""));
-            }
-            if let Some(rule_line) = format_additional_permissions_rule(permissions) {
-                header.push(Line::from(vec![
-                    "Permission rule: ".into(),
-                    rule_line.cyan(),
-                ]));
             }
             Box::new(Paragraph::new(header).wrap(Wrap { trim: false }))
         }
@@ -652,6 +625,307 @@ impl ApprovalOption {
     }
 }
 
+#[derive(Clone)]
+enum PermissionSelectionKind {
+    Network,
+    FileSystemRead(PathBuf),
+    FileSystemWrite(PathBuf),
+    MacOsPreferences(MacOsPreferencesPermission),
+    MacOsAutomationAll,
+    MacOsAutomationBundleId(String),
+    MacOsAccessibility,
+    MacOsCalendar,
+}
+
+#[derive(Clone)]
+struct PermissionSelection {
+    id: String,
+    name: String,
+    description: Option<String>,
+    kind: PermissionSelectionKind,
+}
+
+fn build_permission_picker(
+    request: &ApprovalRequest,
+    app_event_tx: AppEventSender,
+) -> Option<MultiSelectPicker> {
+    let ApprovalRequest::Exec {
+        thread_id,
+        thread_label,
+        id,
+        command,
+        available_decisions,
+        additional_permissions,
+        ..
+    } = request
+    else {
+        return None;
+    };
+
+    if !available_decisions
+        .iter()
+        .any(|decision| matches!(decision, ReviewDecision::ApprovedAdditionalPermissions { .. }))
+    {
+        return None;
+    }
+
+    let requested_permissions = additional_permissions.clone()?;
+    let selections = permission_profile_selections(&requested_permissions);
+    if selections.is_empty() {
+        return None;
+    }
+
+    let picker_items = selections
+        .iter()
+        .map(|selection| MultiSelectItem {
+            id: selection.id.clone(),
+            name: selection.name.clone(),
+            description: selection.description.clone(),
+            enabled: true,
+        })
+        .collect::<Vec<_>>();
+    let selection_snapshot = selections.clone();
+    let thread_id = *thread_id;
+    let thread_label = thread_label.clone();
+    let approval_id = id.clone();
+    let command = command.clone();
+    let confirm_thread_label = thread_label.clone();
+    let cancel_thread_label = thread_label.clone();
+    let confirm_approval_id = approval_id.clone();
+    let cancel_approval_id = approval_id.clone();
+    let confirm_command = command.clone();
+    let cancel_command = command.clone();
+
+    Some(
+        MultiSelectPicker::builder(
+            "Choose permission bundle".to_string(),
+            Some("Select every permission Codex can use for this command right now.".to_string()),
+            app_event_tx,
+        )
+        .items(picker_items)
+        .instructions(vec![
+            "Press ".into(),
+            key_hint::plain(KeyCode::Char('a')).into(),
+            " to toggle, ".into(),
+            key_hint::plain(KeyCode::Char('x')).into(),
+            " to toggle all, ".into(),
+            key_hint::plain(KeyCode::Char('y')).into(),
+            " to submit, or ".into(),
+            key_hint::plain(KeyCode::Esc).into(),
+            " to cancel".into(),
+        ])
+        .on_preview(move |items| {
+            let selected = items.iter().filter(|item| item.enabled).count();
+            Some(Line::from(format!(
+                "{selected} of {} permissions selected",
+                items.len()
+            )))
+        })
+        .on_confirm(move |selected_ids, tx| {
+            let permission_profile =
+                permission_profile_from_selection_ids(&selection_snapshot, selected_ids);
+            let decision = if permission_profile.is_empty() {
+                ReviewDecision::Denied
+            } else {
+                ReviewDecision::ApprovedAdditionalPermissions { permission_profile }
+            };
+            if confirm_thread_label.is_none() {
+                let cell =
+                    history_cell::new_approval_decision_cell(confirm_command.clone(), decision.clone());
+                tx.send(AppEvent::InsertHistoryCell(cell));
+            }
+            tx.send(AppEvent::SubmitThreadOp {
+                thread_id,
+                op: Op::ExecApproval {
+                    id: confirm_approval_id.clone(),
+                    turn_id: None,
+                    decision,
+                },
+            });
+        })
+        .on_cancel(move |tx| {
+            let decision = ReviewDecision::Abort;
+            if cancel_thread_label.is_none() {
+                let cell =
+                    history_cell::new_approval_decision_cell(cancel_command.clone(), decision.clone());
+                tx.send(AppEvent::InsertHistoryCell(cell));
+            }
+            tx.send(AppEvent::SubmitThreadOp {
+                thread_id,
+                op: Op::ExecApproval {
+                    id: cancel_approval_id.clone(),
+                    turn_id: None,
+                    decision,
+                },
+            });
+        })
+        .build(),
+    )
+}
+
+fn permission_profile_selections(permission_profile: &PermissionProfile) -> Vec<PermissionSelection> {
+    let mut selections = Vec::new();
+
+    if permission_profile
+        .network
+        .as_ref()
+        .and_then(|network| network.enabled)
+        .unwrap_or(false)
+    {
+        selections.push(PermissionSelection {
+            id: "network".to_string(),
+            name: "Network access".to_string(),
+            description: Some("Allow outbound network access for this command.".to_string()),
+            kind: PermissionSelectionKind::Network,
+        });
+    }
+
+    if let Some(file_system) = permission_profile.file_system.as_ref() {
+        if let Some(read_paths) = file_system.read.as_ref() {
+            for path in read_paths {
+                selections.push(PermissionSelection {
+                    id: format!("fs-read:{}", path.display()),
+                    name: format!("Read {}", path.display()),
+                    description: Some("Grant read access to this path.".to_string()),
+                    kind: PermissionSelectionKind::FileSystemRead(path.to_path_buf()),
+                });
+            }
+        }
+        if let Some(write_paths) = file_system.write.as_ref() {
+            for path in write_paths {
+                selections.push(PermissionSelection {
+                    id: format!("fs-write:{}", path.display()),
+                    name: format!("Write {}", path.display()),
+                    description: Some("Grant write access to this path.".to_string()),
+                    kind: PermissionSelectionKind::FileSystemWrite(path.to_path_buf()),
+                });
+            }
+        }
+    }
+
+    if let Some(macos) = permission_profile.macos.as_ref() {
+        if !matches!(macos.macos_preferences, MacOsPreferencesPermission::None) {
+            selections.push(PermissionSelection {
+                id: "macos-preferences".to_string(),
+                name: format!(
+                    "macOS preferences ({})",
+                    match macos.macos_preferences {
+                        MacOsPreferencesPermission::None => "none",
+                        MacOsPreferencesPermission::ReadOnly => "read only",
+                        MacOsPreferencesPermission::ReadWrite => "read/write",
+                    }
+                ),
+                description: Some("Extend macOS preferences access.".to_string()),
+                kind: PermissionSelectionKind::MacOsPreferences(macos.macos_preferences.clone()),
+            });
+        }
+
+        match &macos.macos_automation {
+            MacOsAutomationPermission::All => selections.push(PermissionSelection {
+                id: "macos-automation:all".to_string(),
+                name: "macOS automation (all)".to_string(),
+                description: Some("Allow controlling any app through macOS automation.".to_string()),
+                kind: PermissionSelectionKind::MacOsAutomationAll,
+            }),
+            MacOsAutomationPermission::BundleIds(bundle_ids) => {
+                for bundle_id in bundle_ids {
+                    selections.push(PermissionSelection {
+                        id: format!("macos-automation:{bundle_id}"),
+                        name: format!("macOS automation ({bundle_id})"),
+                        description: Some("Allow controlling this specific app.".to_string()),
+                        kind: PermissionSelectionKind::MacOsAutomationBundleId(bundle_id.clone()),
+                    });
+                }
+            }
+            MacOsAutomationPermission::None => {}
+        }
+
+        if macos.macos_accessibility {
+            selections.push(PermissionSelection {
+                id: "macos-accessibility".to_string(),
+                name: "macOS accessibility".to_string(),
+                description: Some("Allow accessibility APIs for UI control.".to_string()),
+                kind: PermissionSelectionKind::MacOsAccessibility,
+            });
+        }
+
+        if macos.macos_calendar {
+            selections.push(PermissionSelection {
+                id: "macos-calendar".to_string(),
+                name: "macOS calendar".to_string(),
+                description: Some("Allow calendar access.".to_string()),
+                kind: PermissionSelectionKind::MacOsCalendar,
+            });
+        }
+    }
+
+    selections
+}
+
+fn permission_profile_from_selection_ids(
+    selections: &[PermissionSelection],
+    selected_ids: &[String],
+) -> PermissionProfile {
+    let selected_ids = selected_ids.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let mut permission_profile = PermissionProfile::default();
+    let mut read_paths = Vec::new();
+    let mut write_paths = Vec::new();
+    let mut automation_bundle_ids = Vec::new();
+
+    for selection in selections {
+        if !selected_ids.contains(&selection.id) {
+            continue;
+        }
+
+        match &selection.kind {
+            PermissionSelectionKind::Network => {
+                permission_profile.network = Some(codex_protocol::models::NetworkPermissions {
+                    enabled: Some(true),
+                });
+            }
+            PermissionSelectionKind::FileSystemRead(path) => {
+                read_paths.push(AbsolutePathBuf::from_absolute_path(path.clone()).expect("absolute path"));
+            }
+            PermissionSelectionKind::FileSystemWrite(path) => {
+                write_paths.push(AbsolutePathBuf::from_absolute_path(path.clone()).expect("absolute path"));
+            }
+            PermissionSelectionKind::MacOsPreferences(permission) => {
+                let macos = permission_profile.macos.get_or_insert_with(Default::default);
+                macos.macos_preferences = permission.clone();
+            }
+            PermissionSelectionKind::MacOsAutomationAll => {
+                let macos = permission_profile.macos.get_or_insert_with(Default::default);
+                macos.macos_automation = MacOsAutomationPermission::All;
+            }
+            PermissionSelectionKind::MacOsAutomationBundleId(bundle_id) => {
+                automation_bundle_ids.push(bundle_id.clone());
+            }
+            PermissionSelectionKind::MacOsAccessibility => {
+                let macos = permission_profile.macos.get_or_insert_with(Default::default);
+                macos.macos_accessibility = true;
+            }
+            PermissionSelectionKind::MacOsCalendar => {
+                let macos = permission_profile.macos.get_or_insert_with(Default::default);
+                macos.macos_calendar = true;
+            }
+        }
+    }
+
+    if !read_paths.is_empty() || !write_paths.is_empty() {
+        permission_profile.file_system = Some(codex_protocol::models::FileSystemPermissions {
+            read: (!read_paths.is_empty()).then_some(read_paths),
+            write: (!write_paths.is_empty()).then_some(write_paths),
+        });
+    }
+
+    if !automation_bundle_ids.is_empty() {
+        let macos = permission_profile.macos.get_or_insert_with(Default::default);
+        macos.macos_automation = MacOsAutomationPermission::BundleIds(automation_bundle_ids);
+    }
+
+    permission_profile
+}
+
 fn exec_options(
     available_decisions: &[ReviewDecision],
     network_approval_context: Option<&NetworkApprovalContext>,
@@ -670,6 +944,23 @@ fn exec_options(
                 display_shortcut: None,
                 additional_shortcuts: vec![key_hint::plain(KeyCode::Char('y'))],
             }),
+            ReviewDecision::ApprovedAdditionalPermissions { permission_profile } => Some(
+                ApprovalOption {
+                    label: format!(
+                        "Yes, choose permissions{}",
+                        format_additional_permissions_rule(permission_profile)
+                            .map(|rule| format!(" ({rule})"))
+                            .unwrap_or_default()
+                    ),
+                    decision: ApprovalDecision::Review(
+                        ReviewDecision::ApprovedAdditionalPermissions {
+                            permission_profile: permission_profile.clone(),
+                        },
+                    ),
+                    display_shortcut: None,
+                    additional_shortcuts: vec![key_hint::plain(KeyCode::Char('x'))],
+                },
+            ),
             ReviewDecision::ApprovedExecpolicyAmendment {
                 proposed_execpolicy_amendment,
             } => {
@@ -742,7 +1033,7 @@ fn exec_options(
         .collect()
 }
 
-pub(crate) fn format_additional_permissions_rule(
+fn format_additional_permissions_rule(
     additional_permissions: &PermissionProfile,
 ) -> Option<String> {
     let mut parts = Vec::new();
@@ -801,17 +1092,6 @@ pub(crate) fn format_additional_permissions_rule(
         if macos.macos_calendar {
             parts.push("macOS calendar".to_string());
         }
-        if macos.macos_reminders {
-            parts.push("macOS reminders".to_string());
-        }
-        if !matches!(macos.macos_contacts, MacOsContactsPermission::None) {
-            let value = match macos.macos_contacts {
-                MacOsContactsPermission::None => "none",
-                MacOsContactsPermission::ReadOnly => "readonly",
-                MacOsContactsPermission::ReadWrite => "readwrite",
-            };
-            parts.push(format!("macOS contacts {value}"));
-        }
     }
 
     if parts.is_empty() {
@@ -839,29 +1119,6 @@ fn patch_options() -> Vec<ApprovalOption> {
             label: "No, and tell Codex what to do differently".to_string(),
             decision: ApprovalDecision::Review(ReviewDecision::Abort),
             display_shortcut: Some(key_hint::plain(KeyCode::Esc)),
-            additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
-        },
-    ]
-}
-
-fn permissions_options() -> Vec<ApprovalOption> {
-    vec![
-        ApprovalOption {
-            label: "Yes, grant these permissions".to_string(),
-            decision: ApprovalDecision::Review(ReviewDecision::Approved),
-            display_shortcut: None,
-            additional_shortcuts: vec![key_hint::plain(KeyCode::Char('y'))],
-        },
-        ApprovalOption {
-            label: "Yes, grant these permissions for this session".to_string(),
-            decision: ApprovalDecision::Review(ReviewDecision::ApprovedForSession),
-            display_shortcut: None,
-            additional_shortcuts: vec![key_hint::plain(KeyCode::Char('a'))],
-        },
-        ApprovalOption {
-            label: "No, continue without permissions".to_string(),
-            decision: ApprovalDecision::Review(ReviewDecision::Denied),
-            display_shortcut: None,
             additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
         },
     ]
@@ -948,25 +1205,6 @@ mod tests {
             available_decisions: vec![ReviewDecision::Approved, ReviewDecision::Abort],
             network_approval_context: None,
             additional_permissions: None,
-        }
-    }
-
-    fn make_permissions_request() -> ApprovalRequest {
-        ApprovalRequest::Permissions {
-            thread_id: ThreadId::new(),
-            thread_label: None,
-            call_id: "test".to_string(),
-            reason: Some("need workspace access".to_string()),
-            permissions: PermissionProfile {
-                network: Some(NetworkPermissions {
-                    enabled: Some(true),
-                }),
-                file_system: Some(FileSystemPermissions {
-                    read: Some(vec![absolute_path("/tmp/readme.txt")]),
-                    write: Some(vec![absolute_path("/tmp/out.txt")]),
-                }),
-                ..Default::default()
-            },
         }
     }
 
@@ -1262,45 +1500,113 @@ mod tests {
     }
 
     #[test]
-    fn permissions_options_use_expected_labels() {
-        let labels: Vec<String> = permissions_options()
-            .into_iter()
-            .map(|option| option.label)
-            .collect();
+    fn permission_profile_selection_round_trip_preserves_selected_subset() {
+        let requested = PermissionProfile {
+            network: Some(NetworkPermissions {
+                enabled: Some(true),
+            }),
+            file_system: Some(FileSystemPermissions {
+                read: Some(vec![absolute_path("/tmp/readme.txt")]),
+                write: Some(vec![absolute_path("/tmp/out.txt")]),
+            }),
+            macos: Some(MacOsSeatbeltProfileExtensions {
+                macos_preferences: MacOsPreferencesPermission::ReadWrite,
+                macos_automation: MacOsAutomationPermission::BundleIds(vec![
+                    "com.apple.Notes".to_string(),
+                ]),
+                macos_accessibility: true,
+                macos_calendar: false,
+            }),
+        };
+
+        let selections = permission_profile_selections(&requested);
+        let selected_ids = vec![
+            "network".to_string(),
+            "fs-write:/tmp/out.txt".to_string(),
+            "macos-accessibility".to_string(),
+        ];
+        let selected = permission_profile_from_selection_ids(&selections, &selected_ids);
+
         assert_eq!(
-            labels,
-            vec![
-                "Yes, grant these permissions".to_string(),
-                "Yes, grant these permissions for this session".to_string(),
-                "No, continue without permissions".to_string(),
-            ]
+            selected,
+            PermissionProfile {
+                network: Some(NetworkPermissions {
+                    enabled: Some(true),
+                }),
+                file_system: Some(FileSystemPermissions {
+                    read: None,
+                    write: Some(vec![absolute_path("/tmp/out.txt")]),
+                }),
+                macos: Some(MacOsSeatbeltProfileExtensions {
+                    macos_preferences: MacOsPreferencesPermission::None,
+                    macos_automation: MacOsAutomationPermission::None,
+                    macos_accessibility: true,
+                    macos_calendar: false,
+                }),
+            }
         );
     }
 
     #[test]
-    fn permissions_session_shortcut_submits_session_scope() {
+    fn additional_permissions_picker_emits_selected_subset() {
         let (tx, mut rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx);
-        let mut view =
-            ApprovalOverlay::new(make_permissions_request(), tx, Features::with_defaults());
+        let requested = PermissionProfile {
+            network: Some(NetworkPermissions {
+                enabled: Some(true),
+            }),
+            file_system: Some(FileSystemPermissions {
+                read: Some(vec![absolute_path("/tmp/readme.txt")]),
+                write: Some(vec![absolute_path("/tmp/out.txt")]),
+            }),
+            ..Default::default()
+        };
+        let mut view = ApprovalOverlay::new(
+            ApprovalRequest::Exec {
+                thread_id: ThreadId::new(),
+                thread_label: None,
+                id: "test".to_string(),
+                command: vec!["cat".to_string(), "/tmp/readme.txt".to_string()],
+                reason: Some("need filesystem access".to_string()),
+                available_decisions: vec![
+                    ReviewDecision::ApprovedAdditionalPermissions {
+                        permission_profile: requested.clone(),
+                    },
+                    ReviewDecision::Approved,
+                    ReviewDecision::Abort,
+                ],
+                network_approval_context: None,
+                additional_permissions: Some(requested),
+            },
+            tx,
+            Features::with_defaults(),
+        );
 
+        view.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         view.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        view.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
 
-        let mut saw_op = false;
-        while let Ok(ev) = rx.try_recv() {
+        let mut decisions = Vec::new();
+        while let Ok(event) = rx.try_recv() {
             if let AppEvent::SubmitThreadOp {
-                op: Op::RequestPermissionsResponse { response, .. },
+                op: Op::ExecApproval { decision, .. },
                 ..
-            } = ev
+            } = event
             {
-                assert_eq!(response.scope, PermissionGrantScope::Session);
-                saw_op = true;
-                break;
+                decisions.push(decision);
             }
         }
-        assert!(
-            saw_op,
-            "expected permission approval decision to emit a session-scoped response"
+
+        assert_eq!(
+            decisions,
+            vec![ReviewDecision::ApprovedAdditionalPermissions {
+                permission_profile: PermissionProfile {
+                    network: Some(NetworkPermissions {
+                        enabled: Some(true),
+                    }),
+                    ..Default::default()
+                }
+            }]
         );
     }
 
@@ -1384,17 +1690,6 @@ mod tests {
     }
 
     #[test]
-    fn permissions_prompt_snapshot() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
-        let tx = AppEventSender::new(tx);
-        let view = ApprovalOverlay::new(make_permissions_request(), tx, Features::with_defaults());
-        assert_snapshot!(
-            "approval_overlay_permissions_prompt",
-            normalize_snapshot_paths(render_overlay_lines(&view, 120))
-        );
-    }
-
-    #[test]
     fn additional_permissions_macos_prompt_snapshot() {
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx);
@@ -1413,11 +1708,8 @@ mod tests {
                         "com.apple.Calendar".to_string(),
                         "com.apple.Notes".to_string(),
                     ]),
-                    macos_launch_services: false,
                     macos_accessibility: true,
                     macos_calendar: true,
-                    macos_reminders: true,
-                    macos_contacts: MacOsContactsPermission::None,
                 }),
                 ..Default::default()
             }),

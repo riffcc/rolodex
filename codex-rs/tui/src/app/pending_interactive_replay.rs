@@ -393,6 +393,7 @@ mod tests {
                 codex_protocol::request_user_input::RequestUserInputEvent {
                     call_id: "call-1".to_string(),
                     turn_id: "turn-1".to_string(),
+                    recursive: false,
                     questions: Vec::new(),
                 },
             ),
@@ -417,6 +418,7 @@ mod tests {
                 codex_protocol::request_user_input::RequestUserInputEvent {
                     call_id: "call-1".to_string(),
                     turn_id: "turn-1".to_string(),
+                    recursive: false,
                     questions: Vec::new(),
                 },
             ),
@@ -482,6 +484,7 @@ mod tests {
                 codex_protocol::request_user_input::RequestUserInputEvent {
                     call_id: "call-1".to_string(),
                     turn_id: "turn-1".to_string(),
+                    recursive: false,
                     questions: Vec::new(),
                 },
             ),
@@ -500,6 +503,7 @@ mod tests {
                 codex_protocol::request_user_input::RequestUserInputEvent {
                     call_id: "call-2".to_string(),
                     turn_id: "turn-1".to_string(),
+                    recursive: false,
                     questions: Vec::new(),
                 },
             ),
@@ -522,6 +526,7 @@ mod tests {
                 codex_protocol::request_user_input::RequestUserInputEvent {
                     call_id: "call-1".to_string(),
                     turn_id: "turn-1".to_string(),
+                    recursive: false,
                     questions: Vec::new(),
                 },
             ),
@@ -532,6 +537,7 @@ mod tests {
                 codex_protocol::request_user_input::RequestUserInputEvent {
                     call_id: "call-2".to_string(),
                     turn_id: "turn-1".to_string(),
+                    recursive: false,
                     questions: Vec::new(),
                 },
             ),
@@ -714,6 +720,7 @@ mod tests {
                 codex_protocol::request_user_input::RequestUserInputEvent {
                     call_id: "call-1".to_string(),
                     turn_id: "turn-1".to_string(),
+                    recursive: false,
                     questions: Vec::new(),
                 },
             ),

@@ -192,7 +192,13 @@ impl ExecApprovalRequestEvent {
         }
 
         if additional_permissions.is_some() {
-            return vec![ReviewDecision::Approved, ReviewDecision::Abort];
+            return vec![
+                ReviewDecision::ApprovedAdditionalPermissions {
+                    permission_profile: additional_permissions.cloned().unwrap_or_default(),
+                },
+                ReviewDecision::Approved,
+                ReviewDecision::Abort,
+            ];
         }
 
         let mut decisions = vec![ReviewDecision::Approved];

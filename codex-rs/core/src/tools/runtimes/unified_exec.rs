@@ -155,6 +155,18 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
         })
     }
 
+    fn apply_approval_decision(
+        &self,
+        req: &UnifiedExecRequest,
+        decision: &ReviewDecision,
+    ) -> UnifiedExecRequest {
+        let mut req = req.clone();
+        if let ReviewDecision::ApprovedAdditionalPermissions { permission_profile } = decision {
+            req.additional_permissions = Some(permission_profile.clone());
+        }
+        req
+    }
+
     fn exec_approval_requirement(
         &self,
         req: &UnifiedExecRequest,

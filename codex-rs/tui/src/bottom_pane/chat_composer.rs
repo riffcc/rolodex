@@ -166,7 +166,6 @@ use super::footer::footer_hint_items_width;
 use super::footer::footer_line_width;
 use super::footer::inset_footer_hint_area;
 use super::footer::max_left_width_for_right;
-use super::footer::passive_footer_status_line;
 use super::footer::render_context_right;
 use super::footer::render_footer_from_props;
 use super::footer::render_footer_hint_items;
@@ -174,7 +173,6 @@ use super::footer::render_footer_line;
 use super::footer::reset_mode_after_activity;
 use super::footer::single_line_footer_layout;
 use super::footer::toggle_shortcut_mode;
-use super::footer::uses_passive_footer_status_layout;
 use super::paste_burst::CharDecision;
 use super::paste_burst::PasteBurst;
 use super::skill_popup::MentionItem;
@@ -193,6 +191,8 @@ use crate::render::RectExt;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::style::user_message_style;
+use crate::style::voice_continuous_style;
+use crate::style::voice_recording_style;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
 use codex_protocol::models::local_image_label_text;
@@ -349,6 +349,14 @@ impl VoiceState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum VoiceVisualState {
+    #[default]
+    Off,
+    Recording,
+    Continuous,
+}
+
 pub(crate) struct ChatComposer {
     textarea: TextArea,
     textarea_state: RefCell<TextAreaState>,
@@ -370,6 +378,8 @@ pub(crate) struct ChatComposer {
     attached_images: Vec<AttachedImage>,
     placeholder_text: String,
     voice_state: VoiceState,
+    voice_visual_state: VoiceVisualState,
+    voice_visualizer: Option<String>,
     // Spinner control flags keyed by placeholder id; set to true to stop.
     spinner_stop_flags: HashMap<String, Arc<AtomicBool>>,
     is_task_running: bool,
@@ -390,7 +400,6 @@ pub(crate) struct ChatComposer {
     footer_flash: Option<FooterFlash>,
     context_window_percent: Option<i64>,
     // Monotonically increasing identifier for textarea elements we insert.
-    #[cfg(not(target_os = "linux"))]
     next_element_id: u64,
     context_window_used_tokens: Option<i64>,
     skills: Option<Vec<SkillMetadata>>,
@@ -410,8 +419,6 @@ pub(crate) struct ChatComposer {
     windows_degraded_sandbox_active: bool,
     status_line_value: Option<Line<'static>>,
     status_line_enabled: bool,
-    // Agent label injected into the footer's contextual row when multi-agent mode is active.
-    active_agent_label: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -499,6 +506,8 @@ impl ChatComposer {
             attached_images: Vec::new(),
             placeholder_text,
             voice_state: VoiceState::new(enhanced_keys_supported),
+            voice_visual_state: VoiceVisualState::Off,
+            voice_visualizer: None,
             spinner_stop_flags: HashMap::new(),
             is_task_running: false,
             input_enabled: true,
@@ -512,7 +521,6 @@ impl ChatComposer {
             selected_remote_image_index: None,
             footer_flash: None,
             context_window_percent: None,
-            #[cfg(not(target_os = "linux"))]
             next_element_id: 0,
             context_window_used_tokens: None,
             skills: None,
@@ -532,14 +540,12 @@ impl ChatComposer {
             windows_degraded_sandbox_active: false,
             status_line_value: None,
             status_line_enabled: false,
-            active_agent_label: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
         this
     }
 
-    #[cfg(not(target_os = "linux"))]
     fn next_id(&mut self) -> String {
         let id = self.next_element_id;
         self.next_element_id = self.next_element_id.wrapping_add(1);
@@ -2783,7 +2789,7 @@ impl ChatComposer {
                 modifiers: KeyModifiers::NONE,
                 kind: KeyEventKind::Press,
                 ..
-            } if !self.is_bang_shell_command() => self.handle_submission(self.is_task_running),
+            } => (InputResult::None, true),
             KeyEvent {
                 code: KeyCode::Enter,
                 modifiers: KeyModifiers::NONE,
@@ -3194,7 +3200,6 @@ impl ChatComposer {
             context_window_used_tokens: self.context_window_used_tokens,
             status_line_value: self.status_line_value.clone(),
             status_line_enabled: self.status_line_enabled,
-            active_agent_label: self.active_agent_label.clone(),
         }
     }
 
@@ -3585,8 +3590,8 @@ impl ChatComposer {
                     insert_text: format!("${skill_name}"),
                     search_terms,
                     path: Some(skill.path_to_skills_md.to_string_lossy().into_owned()),
-                    category_tag: Some("[Skill]".to_string()),
-                    sort_rank: 1,
+                    category_tag: (skill.scope == codex_protocol::protocol::SkillScope::Repo)
+                        .then(|| "[Repo]".to_string()),
                 });
             }
         }
@@ -3637,8 +3642,8 @@ impl ChatComposer {
                     insert_text: format!("${plugin_name}"),
                     search_terms,
                     path: Some(format!("plugin://{}", plugin.config_name)),
-                    category_tag: Some("[Plugin]".to_string()),
-                    sort_rank: 0,
+                    category_tag: (!marketplace_name.is_empty())
+                        .then(|| format!("[{marketplace_name}]")),
                 });
             }
         }
@@ -3662,8 +3667,17 @@ impl ChatComposer {
                     search_terms,
                     path: Some(format!("app://{connector_id}")),
                     category_tag: Some("[App]".to_string()),
-                    sort_rank: 1,
                 });
+            }
+        }
+
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for mention in &mentions {
+            *counts.entry(mention.insert_text.clone()).or_insert(0) += 1;
+        }
+        for mention in &mut mentions {
+            if counts.get(&mention.insert_text).copied().unwrap_or(0) <= 1 {
+                mention.category_tag = None;
             }
         }
 
@@ -3690,6 +3704,34 @@ impl ChatComposer {
     #[cfg(not(target_os = "linux"))]
     pub(crate) fn is_recording(&self) -> bool {
         self.voice_state.voice.is_some()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_recording(&self) -> bool {
+        !matches!(self.voice_visual_state, VoiceVisualState::Off)
+    }
+
+    pub(crate) fn set_voice_visual_state(&mut self, state: VoiceVisualState) {
+        self.voice_visual_state = state;
+        if matches!(state, VoiceVisualState::Off) {
+            self.voice_visualizer = None;
+        }
+    }
+
+    pub(crate) fn update_voice_visualizer(&mut self, visualizer: Option<String>) {
+        self.voice_visualizer = visualizer.filter(|s| !s.trim().is_empty());
+    }
+
+    fn voice_badge_label(&self) -> Option<String> {
+        let prefix = match self.voice_visual_state {
+            VoiceVisualState::Off => return None,
+            VoiceVisualState::Recording => "REC",
+            VoiceVisualState::Continuous => "LIVE",
+        };
+        match self.voice_visualizer.as_deref() {
+            Some(meter) => Some(format!("{prefix} {meter}")),
+            None => Some(prefix.to_string()),
+        }
     }
 
     #[allow(dead_code)]
@@ -3767,17 +3809,36 @@ impl ChatComposer {
         true
     }
 
-    /// Replaces the contextual footer label for the currently viewed agent.
-    ///
-    /// Returning `false` means the value was unchanged, so callers can skip redraw work. This
-    /// field is intentionally just cached presentation state; `ChatComposer` does not infer which
-    /// thread is active on its own.
-    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) -> bool {
-        if self.active_agent_label == active_agent_label {
-            return false;
+    fn stop_transcription_spinner(&mut self, id: &str) {
+        if let Some(flag) = self.spinner_stop_flags.remove(id) {
+            flag.store(true, Ordering::Relaxed);
         }
-        self.active_agent_label = active_agent_label;
-        true
+    }
+
+    fn stop_all_transcription_spinners(&mut self) {
+        for (_id, flag) in self.spinner_stop_flags.drain() {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub fn replace_transcription(&mut self, id: &str, text: &str) {
+        self.stop_transcription_spinner(id);
+        let _ = self.textarea.replace_element_by_id(id, text);
+    }
+
+    pub fn update_transcription_in_place(&mut self, id: &str, text: &str) -> bool {
+        self.textarea.update_named_element_by_id(id, text)
+    }
+
+    pub fn insert_transcription_placeholder(&mut self, text: &str) -> String {
+        let id = self.next_id();
+        self.textarea.insert_named_element(text, id.clone());
+        id
+    }
+
+    pub fn remove_transcription_placeholder(&mut self, id: &str) {
+        self.stop_transcription_spinner(id);
+        let _ = self.textarea.replace_element_by_id(id, "");
     }
 }
 
@@ -4028,38 +4089,6 @@ impl ChatComposer {
         }
     }
 
-    fn stop_transcription_spinner(&mut self, id: &str) {
-        if let Some(flag) = self.spinner_stop_flags.remove(id) {
-            flag.store(true, Ordering::Relaxed);
-        }
-    }
-
-    fn stop_all_transcription_spinners(&mut self) {
-        for (_id, flag) in self.spinner_stop_flags.drain() {
-            flag.store(true, Ordering::Relaxed);
-        }
-    }
-
-    pub fn replace_transcription(&mut self, id: &str, text: &str) {
-        self.stop_transcription_spinner(id);
-        let _ = self.textarea.replace_element_by_id(id, text);
-    }
-
-    pub fn update_transcription_in_place(&mut self, id: &str, text: &str) -> bool {
-        self.textarea.update_named_element_by_id(id, text)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    pub fn insert_transcription_placeholder(&mut self, text: &str) -> String {
-        let id = self.next_id();
-        self.textarea.insert_named_element(text, id.clone());
-        id
-    }
-
-    pub fn remove_transcription_placeholder(&mut self, id: &str) {
-        self.stop_transcription_spinner(id);
-        let _ = self.textarea.replace_element_by_id(id, "");
-    }
 }
 
 fn skill_display_name(skill: &SkillMetadata) -> &str {
@@ -4212,19 +4241,26 @@ impl ChatComposer {
                 };
                 let available_width =
                     hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
-                let status_line_active = uses_passive_footer_status_layout(&footer_props);
-                let combined_status_line = if status_line_active {
-                    passive_footer_status_line(&footer_props).map(ratatui::prelude::Stylize::dim)
-                } else {
-                    None
-                };
-                let mut truncated_status_line = if status_line_active {
-                    combined_status_line.as_ref().map(|line| {
+                let status_line = footer_props
+                    .status_line_value
+                    .as_ref()
+                    .map(|line| line.clone().dim());
+                let status_line_candidate = footer_props.status_line_enabled
+                    && match footer_props.mode {
+                        FooterMode::ComposerEmpty => true,
+                        FooterMode::ComposerHasDraft => !footer_props.is_task_running,
+                        FooterMode::QuitShortcutReminder
+                        | FooterMode::ShortcutOverlay
+                        | FooterMode::EscHint => false,
+                    };
+                let mut truncated_status_line = if status_line_candidate {
+                    status_line.as_ref().map(|line| {
                         truncate_line_with_ellipsis_if_overflow(line.clone(), available_width)
                     })
                 } else {
                     None
                 };
+                let status_line_active = status_line_candidate && truncated_status_line.is_some();
                 let left_mode_indicator = if status_line_active {
                     None
                 } else {
@@ -4271,7 +4307,7 @@ impl ChatComposer {
                 if status_line_active
                     && let Some(max_left) = max_left_width_for_right(hint_rect, right_width)
                     && left_width > max_left
-                    && let Some(line) = combined_status_line.as_ref().map(|line| {
+                    && let Some(line) = status_line.as_ref().map(|line| {
                         truncate_line_with_ellipsis_if_overflow(line.clone(), max_left as usize)
                     })
                 {
@@ -4380,33 +4416,57 @@ impl ChatComposer {
                 }
             }
         }
-        let style = user_message_style();
+        let style = match self.voice_visual_state {
+            VoiceVisualState::Off => user_message_style(),
+            VoiceVisualState::Recording => voice_recording_style(),
+            VoiceVisualState::Continuous => voice_continuous_style(),
+        };
         Block::default().style(style).render_ref(composer_rect, buf);
         if !remote_images_rect.is_empty() {
             Paragraph::new(self.remote_images_lines(remote_images_rect.width))
                 .style(style)
                 .render_ref(remote_images_rect, buf);
         }
+        let prompt = if self.input_enabled {
+            match self.voice_visual_state {
+                VoiceVisualState::Off => "›".bold(),
+                VoiceVisualState::Recording => "◉".bold(),
+                VoiceVisualState::Continuous => "≈".bold(),
+            }
+        } else {
+            "›".dim()
+        };
         if !textarea_rect.is_empty() {
-            let prompt = if self.input_enabled {
-                "›".bold()
-            } else {
-                "›".dim()
-            };
             buf.set_span(
                 textarea_rect.x - LIVE_PREFIX_COLS,
                 textarea_rect.y,
                 &prompt,
                 textarea_rect.width,
             );
+
+            if let Some(label) = self.voice_badge_label() {
+                let badge = Span::from(label).bold();
+                let badge_width = badge.width() as u16;
+                let badge_x = composer_rect
+                    .x
+                    .saturating_add(composer_rect.width.saturating_sub(badge_width + 2));
+                let badge_y = composer_rect.y;
+                buf.set_span(badge_x, badge_y, &badge, badge_width);
+            }
         }
 
         let mut state = self.textarea_state.borrow_mut();
         if let Some(mask_char) = mask_char {
-            self.textarea
-                .render_ref_masked(textarea_rect, buf, &mut state, mask_char);
+            self.textarea.render_ref_masked_styled(
+                textarea_rect,
+                buf,
+                &mut state,
+                mask_char,
+                style,
+            );
         } else {
-            StatefulWidgetRef::render_ref(&(&self.textarea), textarea_rect, buf, &mut state);
+            self.textarea
+                .render_ref_styled(textarea_rect, buf, &mut state, style);
         }
         if self.textarea.text().is_empty() {
             let text = if self.input_enabled {
@@ -5343,60 +5403,6 @@ mod tests {
                     "calendar".to_string(),
                 )],
             }]));
-        });
-    }
-
-    #[test]
-    fn mention_popup_type_prefixes_snapshot() {
-        snapshot_composer_state_with_width("mention_popup_type_prefixes", 72, false, |composer| {
-            composer.set_connectors_enabled(true);
-            composer.set_text_content("$goog".to_string(), Vec::new(), Vec::new());
-            composer.set_skill_mentions(Some(vec![SkillMetadata {
-                name: "google-calendar-skill".to_string(),
-                description: "Find availability and plan event changes".to_string(),
-                short_description: None,
-                interface: Some(codex_core::skills::model::SkillInterface {
-                    display_name: Some("Google Calendar".to_string()),
-                    short_description: None,
-                    icon_small: None,
-                    icon_large: None,
-                    brand_color: None,
-                    default_prompt: None,
-                }),
-                dependencies: None,
-                policy: None,
-                permission_profile: None,
-                path_to_skills_md: PathBuf::from("/tmp/repo/google-calendar/SKILL.md"),
-                scope: codex_protocol::protocol::SkillScope::Repo,
-            }]));
-            composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
-                config_name: "google-calendar@debug".to_string(),
-                display_name: "Google Calendar".to_string(),
-                description: Some(
-                    "Connect Google Calendar for scheduling, availability, and event management."
-                        .to_string(),
-                ),
-                has_skills: false,
-                mcp_server_names: vec!["google-calendar".to_string()],
-                app_connector_ids: Vec::new(),
-            }]));
-            composer.set_connector_mentions(Some(ConnectorsSnapshot {
-                connectors: vec![AppInfo {
-                    id: "google_calendar".to_string(),
-                    name: "Google Calendar".to_string(),
-                    description: Some("Look up events and availability".to_string()),
-                    logo_url: None,
-                    logo_url_dark: None,
-                    distribution_channel: None,
-                    branding: None,
-                    app_metadata: None,
-                    labels: None,
-                    install_url: Some("https://example.test/google-calendar".to_string()),
-                    is_accessible: true,
-                    is_enabled: true,
-                    plugin_display_names: Vec::new(),
-                }],
-            }));
         });
     }
 
@@ -7043,7 +7049,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_submits_when_no_task_running() {
+    fn tab_does_not_submit_when_no_popup_is_active() {
         use crossterm::event::KeyCode;
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
@@ -7063,40 +7069,8 @@ mod tests {
         let (result, _needs_redraw) =
             composer.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
-        assert!(matches!(
-            result,
-            InputResult::Submitted { ref text, .. } if text == "hi"
-        ));
-        assert!(composer.textarea.is_empty());
-    }
-
-    #[test]
-    fn tab_does_not_submit_for_bang_shell_command() {
-        use crossterm::event::KeyCode;
-        use crossterm::event::KeyEvent;
-        use crossterm::event::KeyModifiers;
-
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
-        let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(
-            true,
-            sender,
-            false,
-            "Ask Codex to do anything".to_string(),
-            false,
-        );
-        composer.set_task_running(false);
-
-        type_chars_humanlike(&mut composer, &['!', 'l', 's']);
-
-        let (result, _needs_redraw) =
-            composer.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-
         assert!(matches!(result, InputResult::None));
-        assert!(
-            composer.textarea.text().starts_with("!ls"),
-            "expected Tab not to submit or clear a `!` command"
-        );
+        assert_eq!(composer.textarea.text(), "hi");
     }
 
     #[test]

@@ -91,7 +91,7 @@ pub struct ApplyPatchArgs {
     pub workdir: Option<String>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ApplyPatchFileChange {
     Add {
         content: String,
@@ -125,6 +125,7 @@ pub enum MaybeApplyPatchVerified {
 /// ApplyPatchAction is the result of parsing an `apply_patch` command. By
 /// construction, all paths should be absolute paths.
 #[derive(Debug, PartialEq)]
+#[derive(Clone)]
 pub struct ApplyPatchAction {
     changes: HashMap<PathBuf, ApplyPatchFileChange>,
 

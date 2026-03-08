@@ -1,5 +1,7 @@
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+#[cfg(target_os = "linux")]
+use handy_core::transcribe_default;
 use base64::Engine;
 use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::config::Config;
@@ -24,7 +26,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use tracing::error;
-use tracing::info;
 use tracing::trace;
 
 const AUDIO_MODEL: &str = "gpt-4o-mini-transcribe";
@@ -212,6 +213,40 @@ pub fn transcribe_async(
     context: Option<String>,
     tx: AppEventSender,
 ) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = context;
+        std::thread::spawn(move || {
+            const MIN_DURATION_SECONDS: f32 = 0.25;
+            let duration_seconds = clip_duration_seconds(&audio);
+            if duration_seconds < MIN_DURATION_SECONDS {
+                tx.send(AppEvent::TranscriptionFailed {
+                    id,
+                    error: format!(
+                        "recording too short ({duration_seconds:.2}s); minimum is {MIN_DURATION_SECONDS:.2}s"
+                    ),
+                });
+                return;
+            }
+
+            let pcm = convert_pcm16(&audio.data, audio.sample_rate, audio.channels, 16_000, 1);
+            let samples: Vec<f32> = pcm
+                .into_iter()
+                .map(|sample| sample as f32 / i16::MAX as f32)
+                .collect();
+
+            match transcribe_default(samples) {
+                Ok(text) => tx.send(AppEvent::TranscriptionComplete { id, text }),
+                Err(err) => tx.send(AppEvent::TranscriptionFailed {
+                    id,
+                    error: err.to_string(),
+                }),
+            }
+        });
+        return;
+    }
+
+    #[cfg(not(target_os = "linux"))]
     std::thread::spawn(move || {
         // Enforce minimum duration to avoid garbage outputs.
         const MIN_DURATION_SECONDS: f32 = 1.0;

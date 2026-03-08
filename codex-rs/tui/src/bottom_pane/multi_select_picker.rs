@@ -306,6 +306,30 @@ impl MultiSelectPicker {
         }
     }
 
+    fn toggle_all_visible(&mut self) {
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+
+        let enable_all = self.filtered_indices.iter().any(|idx| {
+            self.items
+                .get(*idx)
+                .map(|item| !item.enabled)
+                .unwrap_or(false)
+        });
+
+        for actual_idx in &self.filtered_indices {
+            if let Some(item) = self.items.get_mut(*actual_idx) {
+                item.enabled = enable_all;
+            }
+        }
+
+        self.update_preview_line();
+        if let Some(on_change) = &self.on_change {
+            on_change(&self.items, &self.app_event_tx);
+        }
+    }
+
     /// Confirms the current selection and closes the picker.
     ///
     /// Collects the IDs of all enabled items and passes them to the
@@ -404,6 +428,16 @@ impl MultiSelectPicker {
 }
 
 impl BottomPaneView for MultiSelectPicker {
+    fn map_gamepad_action(&self, action: crate::tui::GamepadAction) -> Option<KeyCode> {
+        match action {
+            crate::tui::GamepadAction::Confirm => Some(KeyCode::Char(' ')),
+            crate::tui::GamepadAction::Submit | crate::tui::GamepadAction::Alternate => {
+                Some(KeyCode::Enter)
+            }
+            _ => None,
+        }
+    }
+
     fn is_complete(&self) -> bool {
         self.complete
     }
@@ -469,9 +503,24 @@ impl BottomPaneView for MultiSelectPicker {
                 code: KeyCode::Char(' '),
                 modifiers: KeyModifiers::NONE,
                 ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('a'),
+                modifiers: KeyModifiers::NONE,
+                ..
             } => self.toggle_selected(),
             KeyEvent {
+                code: KeyCode::Char('x'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.toggle_all_visible(),
+            KeyEvent {
                 code: KeyCode::Enter,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('y'),
+                modifiers: KeyModifiers::NONE,
                 ..
             } => self.confirm_selection(),
             KeyEvent {

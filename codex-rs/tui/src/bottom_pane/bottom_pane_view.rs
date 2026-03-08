@@ -1,7 +1,9 @@
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::render::renderable::Renderable;
+use crate::tui::GamepadAction;
 use codex_protocol::request_user_input::RequestUserInputEvent;
+use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 
 use super::CancellationEvent;
@@ -22,9 +24,8 @@ pub(crate) trait BottomPaneView: Renderable {
         None
     }
 
-    /// Actual item index for list-based views that want to preserve selection
-    /// across external refreshes.
-    fn selected_index(&self) -> Option<usize> {
+    /// Optionally override how the active view wants a gamepad action mapped.
+    fn map_gamepad_action(&self, _action: GamepadAction) -> Option<KeyCode> {
         None
     }
 

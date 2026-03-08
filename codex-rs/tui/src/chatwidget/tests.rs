@@ -1855,6 +1855,8 @@ async fn make_chatwidget_manual(
         connectors_cache: ConnectorsCacheState::default(),
         connectors_partial_snapshot: None,
         connectors_prefetch_in_flight: false,
+        task_picker_request_id: 0,
+        task_picker_action_cache: Vec::new(),
         connectors_force_refetch_pending: false,
         interrupts: InterruptManager::new(),
         reasoning_buffer: String::new(),
@@ -2741,11 +2743,15 @@ async fn user_input_notification_overrides_pending_agent_turn_complete_notificat
     chat.handle_request_user_input_now(RequestUserInputEvent {
         call_id: "call-1".to_string(),
         turn_id: "turn-1".to_string(),
+        recursive: false,
         questions: vec![RequestUserInputQuestion {
             id: "reasoning_scope".to_string(),
             header: "Reasoning scope".to_string(),
             question: "Which reasoning scope should I use?".to_string(),
+            allow_multiple: false,
             is_other: false,
+            other_label: None,
+            other_description: None,
             is_secret: false,
             options: Some(vec![RequestUserInputQuestionOption {
                 label: "Plan only".to_string(),
@@ -2771,11 +2777,15 @@ async fn handle_request_user_input_sets_pending_notification() {
     chat.handle_request_user_input_now(RequestUserInputEvent {
         call_id: "call-1".to_string(),
         turn_id: "turn-1".to_string(),
+        recursive: false,
         questions: vec![RequestUserInputQuestion {
             id: "reasoning_scope".to_string(),
             header: "Reasoning scope".to_string(),
             question: "Which reasoning scope should I use?".to_string(),
+            allow_multiple: false,
             is_other: false,
+            other_label: None,
+            other_description: None,
             is_secret: false,
             options: Some(vec![RequestUserInputQuestionOption {
                 label: "Plan only".to_string(),

@@ -812,6 +812,19 @@ pub fn new_approval_decision_cell(
                 ],
             )
         }
+        ApprovedAdditionalPermissions { .. } => {
+            let snippet = Span::from(exec_snippet(&command)).dim();
+            (
+                "✔ ".green(),
+                vec![
+                    "You ".into(),
+                    "approved".bold(),
+                    " codex to run ".into(),
+                    snippet,
+                    " with the selected permissions".bold(),
+                ],
+            )
+        }
         ApprovedExecpolicyAmendment {
             proposed_execpolicy_amendment,
         } => {

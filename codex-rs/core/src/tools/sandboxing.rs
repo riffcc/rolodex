@@ -273,6 +273,13 @@ pub(crate) trait Approvable<Req> {
         req: &'a Req,
         ctx: ApprovalCtx<'a>,
     ) -> BoxFuture<'a, ReviewDecision>;
+
+    fn apply_approval_decision(&self, req: &Req, _decision: &ReviewDecision) -> Req
+    where
+        Req: Clone,
+    {
+        req.clone()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

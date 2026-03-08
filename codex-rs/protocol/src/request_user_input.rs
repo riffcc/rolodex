@@ -16,10 +16,22 @@ pub struct RequestUserInputQuestion {
     pub id: String,
     pub header: String,
     pub question: String,
+    #[serde(rename = "allowMultiple", default)]
+    #[schemars(rename = "allowMultiple")]
+    #[ts(rename = "allowMultiple")]
+    pub allow_multiple: bool,
     #[serde(rename = "isOther", default)]
     #[schemars(rename = "isOther")]
     #[ts(rename = "isOther")]
     pub is_other: bool,
+    #[serde(rename = "otherLabel", skip_serializing_if = "Option::is_none")]
+    #[schemars(rename = "otherLabel")]
+    #[ts(rename = "otherLabel", optional)]
+    pub other_label: Option<String>,
+    #[serde(rename = "otherDescription", skip_serializing_if = "Option::is_none")]
+    #[schemars(rename = "otherDescription")]
+    #[ts(rename = "otherDescription", optional)]
+    pub other_description: Option<String>,
     #[serde(rename = "isSecret", default)]
     #[schemars(rename = "isSecret")]
     #[ts(rename = "isSecret")]
@@ -30,6 +42,8 @@ pub struct RequestUserInputQuestion {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct RequestUserInputArgs {
+    #[serde(default)]
+    pub recursive: bool,
     pub questions: Vec<RequestUserInputQuestion>,
 }
 
@@ -51,5 +65,7 @@ pub struct RequestUserInputEvent {
     /// Uses `#[serde(default)]` for backwards compatibility.
     #[serde(default)]
     pub turn_id: String,
+    #[serde(default)]
+    pub recursive: bool,
     pub questions: Vec<RequestUserInputQuestion>,
 }

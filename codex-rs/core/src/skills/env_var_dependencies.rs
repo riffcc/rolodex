@@ -115,7 +115,10 @@ pub(crate) async fn request_skill_dependencies(
                 id: dep.name.clone(),
                 header: "Skill requires environment variable".to_string(),
                 question,
+                allow_multiple: false,
                 is_other: false,
+                other_label: None,
+                other_description: None,
                 is_secret: true,
                 options: None,
             }
@@ -126,7 +129,10 @@ pub(crate) async fn request_skill_dependencies(
         return;
     }
 
-    let args = RequestUserInputArgs { questions };
+    let args = RequestUserInputArgs {
+        recursive: false,
+        questions,
+    };
     let call_id = format!("skill-deps-{}", turn_context.sub_id);
     let response = sess
         .request_user_input(turn_context, call_id, args)

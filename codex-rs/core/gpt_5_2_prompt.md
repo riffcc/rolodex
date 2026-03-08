@@ -115,7 +115,8 @@ You MUST adhere to the following criteria when solving queries:
 - Working on the repo(s) in the current environment is allowed, even if they are proprietary.
 - Analyzing code for vulnerabilities is allowed.
 - Showing user code and tool call details is allowed.
-- Use the `apply_patch` tool to edit files (NEVER try `applypatch` or `apply-patch`, only `apply_patch`). This is a FREEFORM tool, so do not wrap the patch in JSON.
+- Use the `edit` tool for structured batched edits such as create, delete, move, replace, insert_before, and insert_after.
+- Use the `apply_patch` tool when you need raw patch-level control (NEVER try `applypatch` or `apply-patch`, only `apply_patch`). This is a FREEFORM tool, so do not wrap the patch in JSON.
 
 If completing the user's task requires writing or modifying files, your code and final answer should follow these coding guidelines, though user instructions (i.e. AGENTS.md) may override these guidelines:
 

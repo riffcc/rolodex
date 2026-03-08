@@ -24,16 +24,32 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use crossterm::event::Event;
+use gilrs::Axis;
+use gilrs::Button;
+use gilrs::EventType;
+use gilrs::Gilrs;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+use super::GamepadAction;
 use super::TuiEvent;
+
+const GAMEPAD_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const GAMEPAD_REPEAT_DELAY: Duration = Duration::from_millis(250);
+const GAMEPAD_MIN_REPEAT_INTERVAL: Duration = Duration::from_millis(60);
+const GAMEPAD_MAX_REPEAT_INTERVAL: Duration = Duration::from_millis(180);
+const STICK_DEADZONE: f32 = 0.45;
+const TRIGGER_DEADZONE: f32 = 0.55;
 
 /// Result type produced by an event source.
 pub type EventResult = std::io::Result<Event>;
@@ -140,8 +156,9 @@ pub struct TuiEventStream<S: EventSource + Default + Unpin = CrosstermEventSourc
     broker: Arc<EventBroker<S>>,
     draw_stream: BroadcastStream<()>,
     resume_stream: WatchStream<()>,
+    gamepad_rx: mpsc::UnboundedReceiver<TuiEvent>,
     terminal_focused: Arc<AtomicBool>,
-    poll_draw_first: bool,
+    poll_slot: u8,
     #[cfg(unix)]
     suspend_context: crate::tui::job_control::SuspendContext,
     #[cfg(unix)]
@@ -156,13 +173,34 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
         #[cfg(unix)] suspend_context: crate::tui::job_control::SuspendContext,
         #[cfg(unix)] alt_screen_active: Arc<AtomicBool>,
     ) -> Self {
+        Self::new_with_gamepad_rx(
+            broker,
+            draw_rx,
+            spawn_gamepad_event_stream(),
+            terminal_focused,
+            #[cfg(unix)]
+            suspend_context,
+            #[cfg(unix)]
+            alt_screen_active,
+        )
+    }
+
+    fn new_with_gamepad_rx(
+        broker: Arc<EventBroker<S>>,
+        draw_rx: broadcast::Receiver<()>,
+        gamepad_rx: mpsc::UnboundedReceiver<TuiEvent>,
+        terminal_focused: Arc<AtomicBool>,
+        #[cfg(unix)] suspend_context: crate::tui::job_control::SuspendContext,
+        #[cfg(unix)] alt_screen_active: Arc<AtomicBool>,
+    ) -> Self {
         let resume_stream = WatchStream::from_changes(broker.resume_events_rx());
         Self {
             broker,
             draw_stream: BroadcastStream::new(draw_rx),
             resume_stream,
+            gamepad_rx,
             terminal_focused,
-            poll_draw_first: false,
+            poll_slot: 0,
             #[cfg(unix)]
             suspend_context,
             #[cfg(unix)]
@@ -233,6 +271,18 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
         }
     }
 
+    pub fn poll_gamepad_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<TuiEvent>> {
+        if !self.terminal_focused.load(Ordering::Relaxed) {
+            while let Poll::Ready(Some(_)) = Pin::new(&mut self.gamepad_rx).poll_recv(cx) {}
+            return Poll::Pending;
+        }
+
+        match Pin::new(&mut self.gamepad_rx).poll_recv(cx) {
+            Poll::Ready(Some(event)) => Poll::Ready(Some(event)),
+            Poll::Ready(None) | Poll::Pending => Poll::Pending,
+        }
+    }
+
     /// Map a crossterm event to a [`TuiEvent`], skipping events we don't use (mouse events, etc.).
     fn map_crossterm_event(&mut self, event: Event) -> Option<TuiEvent> {
         match event {
@@ -266,28 +316,276 @@ impl<S: EventSource + Default + Unpin> Stream for TuiEventStream<S> {
     type Item = TuiEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // approximate fairness + no starvation via round-robin.
-        let draw_first = self.poll_draw_first;
-        self.poll_draw_first = !self.poll_draw_first;
+        let start = self.poll_slot;
+        self.poll_slot = (self.poll_slot + 1) % 3;
 
-        if draw_first {
-            if let Poll::Ready(event) = self.poll_draw_event(cx) {
-                return Poll::Ready(event);
-            }
-            if let Poll::Ready(event) = self.poll_crossterm_event(cx) {
-                return Poll::Ready(event);
-            }
-        } else {
-            if let Poll::Ready(event) = self.poll_crossterm_event(cx) {
-                return Poll::Ready(event);
-            }
-            if let Poll::Ready(event) = self.poll_draw_event(cx) {
-                return Poll::Ready(event);
+        for offset in 0..3 {
+            match (start + offset) % 3 {
+                0 => {
+                    if let Poll::Ready(event) = self.poll_crossterm_event(cx) {
+                        return Poll::Ready(event);
+                    }
+                }
+                1 => {
+                    if let Poll::Ready(event) = self.poll_gamepad_event(cx) {
+                        return Poll::Ready(event);
+                    }
+                }
+                _ => {
+                    if let Poll::Ready(event) = self.poll_draw_event(cx) {
+                        return Poll::Ready(event);
+                    }
+                }
             }
         }
 
         Poll::Pending
     }
+}
+
+fn spawn_gamepad_event_stream() -> mpsc::UnboundedReceiver<TuiEvent> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let builder = thread::Builder::new().name("codex-gamepad".to_string());
+    if let Err(err) = builder.spawn(move || run_gamepad_event_loop(tx)) {
+        tracing::debug!(error = %err, "failed to start gamepad input thread");
+    }
+    rx
+}
+
+fn run_gamepad_event_loop(tx: mpsc::UnboundedSender<TuiEvent>) {
+    let mut gilrs = match Gilrs::new() {
+        Ok(gilrs) => gilrs,
+        Err(err) => {
+            tracing::debug!(error = %err, "gamepad support unavailable");
+            return;
+        }
+    };
+    let mut state = GamepadState::default();
+
+    loop {
+        if tx.is_closed() {
+            return;
+        }
+        while let Some(event) = gilrs.next_event() {
+            state.handle_event(event.event, &tx);
+        }
+        state.emit_repeats(&tx);
+        thread::sleep(GAMEPAD_POLL_INTERVAL);
+    }
+}
+
+#[derive(Default)]
+struct GamepadState {
+    left_x: f32,
+    left_y: f32,
+    left_trigger_axis: f32,
+    right_trigger_axis: f32,
+    dpad_up: bool,
+    dpad_down: bool,
+    dpad_left: bool,
+    dpad_right: bool,
+    focus_prev_button: bool,
+    focus_next_button: bool,
+    page_prev_button: bool,
+    page_next_button: bool,
+    repeat_up: RepeatState,
+    repeat_down: RepeatState,
+    repeat_left: RepeatState,
+    repeat_right: RepeatState,
+    repeat_focus_prev: RepeatState,
+    repeat_focus_next: RepeatState,
+    repeat_page_prev: RepeatState,
+    repeat_page_next: RepeatState,
+}
+
+#[derive(Default)]
+struct RepeatState {
+    next_emit_at: Option<Instant>,
+}
+
+impl RepeatState {
+    fn tick(
+        &mut self,
+        active: bool,
+        strength: f32,
+        tx: &mpsc::UnboundedSender<TuiEvent>,
+        event: TuiEvent,
+        now: Instant,
+    ) {
+        if !active {
+            self.next_emit_at = None;
+            return;
+        }
+
+        match self.next_emit_at {
+            None => {
+                let _ = tx.send(event);
+                self.next_emit_at = Some(now + GAMEPAD_REPEAT_DELAY);
+            }
+            Some(next_emit_at) if now >= next_emit_at => {
+                let _ = tx.send(event);
+                self.next_emit_at = Some(now + repeat_interval(strength));
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+impl GamepadState {
+    fn handle_event(&mut self, event: EventType, tx: &mpsc::UnboundedSender<TuiEvent>) {
+        match event {
+            EventType::ButtonPressed(button, _) => self.set_button(button, true, tx),
+            EventType::ButtonReleased(button, _) => self.set_button(button, false, tx),
+            EventType::AxisChanged(axis, value, _) => self.set_axis(axis, value),
+            EventType::Disconnected | EventType::Dropped => *self = Self::default(),
+            _ => {}
+        }
+    }
+
+    fn set_button(
+        &mut self,
+        button: Button,
+        pressed: bool,
+        tx: &mpsc::UnboundedSender<TuiEvent>,
+    ) {
+        match button {
+            Button::DPadUp => self.dpad_up = pressed,
+            Button::DPadDown => self.dpad_down = pressed,
+            Button::DPadLeft => self.dpad_left = pressed,
+            Button::DPadRight => self.dpad_right = pressed,
+            Button::LeftTrigger => self.page_prev_button = pressed,
+            Button::RightTrigger => self.page_next_button = pressed,
+            Button::LeftTrigger2 => self.focus_prev_button = pressed,
+            Button::RightTrigger2 => self.focus_next_button = pressed,
+            Button::South if pressed => {
+                let _ = tx.send(TuiEvent::Gamepad(GamepadAction::Confirm));
+            }
+            Button::North if pressed => {
+                let _ = tx.send(TuiEvent::Gamepad(GamepadAction::Submit));
+            }
+            Button::East if pressed => {
+                let _ = tx.send(TuiEvent::Gamepad(GamepadAction::Cancel));
+            }
+            Button::West if pressed => {
+                let _ = tx.send(TuiEvent::Gamepad(GamepadAction::Context));
+            }
+            Button::Select => {
+                let _ = tx.send(TuiEvent::Gamepad(if pressed {
+                    GamepadAction::PushToTalkStart
+                } else {
+                    GamepadAction::PushToTalkStop
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    fn set_axis(&mut self, axis: Axis, value: f32) {
+        match axis {
+            Axis::LeftStickX => self.left_x = value,
+            Axis::LeftStickY => self.left_y = value,
+            Axis::LeftZ => self.left_trigger_axis = normalize_trigger(value),
+            Axis::RightZ => self.right_trigger_axis = normalize_trigger(value),
+            _ => {}
+        }
+    }
+
+    fn emit_repeats(&mut self, tx: &mpsc::UnboundedSender<TuiEvent>) {
+        let now = Instant::now();
+
+        let left_strength = axis_strength(self.left_x, false);
+        let right_strength = axis_strength(self.left_x, true);
+        let up_strength = axis_strength(-self.left_y, true);
+        let down_strength = axis_strength(self.left_y, true);
+        let focus_prev_strength = self
+            .left_trigger_axis
+            .max(if self.focus_prev_button { 1.0 } else { 0.0 });
+        let focus_next_strength = self
+            .right_trigger_axis
+            .max(if self.focus_next_button { 1.0 } else { 0.0 });
+        let page_prev_strength = if self.page_prev_button { 1.0 } else { 0.0 };
+        let page_next_strength = if self.page_next_button { 1.0 } else { 0.0 };
+
+        self.repeat_up.tick(
+            self.dpad_up || up_strength > 0.0,
+            up_strength.max(if self.dpad_up { 1.0 } else { 0.0 }),
+            tx,
+            TuiEvent::Gamepad(GamepadAction::Up),
+            now,
+        );
+        self.repeat_down.tick(
+            self.dpad_down || down_strength > 0.0,
+            down_strength.max(if self.dpad_down { 1.0 } else { 0.0 }),
+            tx,
+            TuiEvent::Gamepad(GamepadAction::Down),
+            now,
+        );
+        self.repeat_left.tick(
+            self.dpad_left || left_strength > 0.0,
+            left_strength.max(if self.dpad_left { 1.0 } else { 0.0 }),
+            tx,
+            TuiEvent::Gamepad(GamepadAction::Left),
+            now,
+        );
+        self.repeat_right.tick(
+            self.dpad_right || right_strength > 0.0,
+            right_strength.max(if self.dpad_right { 1.0 } else { 0.0 }),
+            tx,
+            TuiEvent::Gamepad(GamepadAction::Right),
+            now,
+        );
+        self.repeat_focus_prev.tick(
+            focus_prev_strength > TRIGGER_DEADZONE,
+            focus_prev_strength,
+            tx,
+            TuiEvent::Gamepad(GamepadAction::FocusPrevious),
+            now,
+        );
+        self.repeat_focus_next.tick(
+            focus_next_strength > TRIGGER_DEADZONE,
+            focus_next_strength,
+            tx,
+            TuiEvent::Gamepad(GamepadAction::FocusNext),
+            now,
+        );
+        self.repeat_page_prev.tick(
+            page_prev_strength > 0.0,
+            page_prev_strength,
+            tx,
+            TuiEvent::Gamepad(GamepadAction::PreviousPage),
+            now,
+        );
+        self.repeat_page_next.tick(
+            page_next_strength > 0.0,
+            page_next_strength,
+            tx,
+            TuiEvent::Gamepad(GamepadAction::NextPage),
+            now,
+        );
+    }
+}
+
+fn normalize_trigger(value: f32) -> f32 {
+    ((value + 1.0) / 2.0).clamp(0.0, 1.0)
+}
+
+fn axis_strength(value: f32, positive_direction: bool) -> f32 {
+    let component = if positive_direction {
+        value.max(0.0)
+    } else {
+        (-value).max(0.0)
+    };
+    if component < STICK_DEADZONE {
+        0.0
+    } else {
+        component
+    }
+}
+
+fn repeat_interval(strength: f32) -> Duration {
+    let strength = strength.clamp(0.0, 1.0);
+    let span = GAMEPAD_MAX_REPEAT_INTERVAL - GAMEPAD_MIN_REPEAT_INTERVAL;
+    GAMEPAD_MAX_REPEAT_INTERVAL - span.mul_f32(strength)
 }
 
 #[cfg(test)]
@@ -358,9 +656,11 @@ mod tests {
         draw_rx: broadcast::Receiver<()>,
         terminal_focused: Arc<AtomicBool>,
     ) -> TuiEventStream<FakeEventSource> {
-        TuiEventStream::new(
+        let (_gamepad_tx, gamepad_rx) = mpsc::unbounded_channel();
+        TuiEventStream::new_with_gamepad_rx(
             broker,
             draw_rx,
+            gamepad_rx,
             terminal_focused,
             #[cfg(unix)]
             crate::tui::job_control::SuspendContext::new(),
@@ -386,6 +686,61 @@ mod tests {
         let (draw_tx, draw_rx) = broadcast::channel(1);
         let terminal_focused = Arc::new(AtomicBool::new(true));
         (broker, handle, draw_tx, draw_rx, terminal_focused)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gamepad_events_are_delivered() {
+        let (broker, _handle, _draw_tx, draw_rx, terminal_focused) = setup();
+        let (gamepad_tx, gamepad_rx) = mpsc::unbounded_channel();
+        let mut stream = TuiEventStream::new_with_gamepad_rx(
+            broker,
+            draw_rx,
+            gamepad_rx,
+            terminal_focused,
+            #[cfg(unix)]
+            crate::tui::job_control::SuspendContext::new(),
+            #[cfg(unix)]
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        gamepad_tx
+            .send(TuiEvent::Gamepad(GamepadAction::Confirm))
+            .expect("send gamepad event");
+
+        let next = stream.next().await.unwrap();
+        assert!(matches!(next, TuiEvent::Gamepad(GamepadAction::Confirm)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gamepad_events_are_dropped_while_unfocused() {
+        let (broker, _handle, _draw_tx, draw_rx, terminal_focused) = setup();
+        terminal_focused.store(false, Ordering::Relaxed);
+        let (gamepad_tx, gamepad_rx) = mpsc::unbounded_channel();
+        let mut stream = TuiEventStream::new_with_gamepad_rx(
+            broker,
+            draw_rx,
+            gamepad_rx,
+            terminal_focused.clone(),
+            #[cfg(unix)]
+            crate::tui::job_control::SuspendContext::new(),
+            #[cfg(unix)]
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        gamepad_tx
+            .send(TuiEvent::Gamepad(GamepadAction::Confirm))
+            .expect("send first gamepad event");
+
+        let next = timeout(Duration::from_millis(25), stream.next()).await;
+        assert!(next.is_err(), "unfocused stream should not yield a gamepad event");
+
+        terminal_focused.store(true, Ordering::Relaxed);
+        gamepad_tx
+            .send(TuiEvent::Gamepad(GamepadAction::Context))
+            .expect("send second gamepad event");
+
+        let next = stream.next().await.unwrap();
+        assert!(matches!(next, TuiEvent::Gamepad(GamepadAction::Context)));
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -576,7 +576,10 @@ pub(crate) async fn apply_bespoke_event_handling(
                         id: question.id,
                         header: question.header,
                         question: question.question,
+                        allow_multiple: question.allow_multiple,
                         is_other: question.is_other,
+                        other_label: question.other_label,
+                        other_description: question.other_description,
                         is_secret: question.is_secret,
                         options: question.options.map(|options| {
                             options
@@ -593,6 +596,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                     thread_id: conversation_id.to_string(),
                     turn_id: request.turn_id,
                     item_id: request.call_id,
+                    recursive: request.recursive,
                     questions,
                 };
                 let (pending_request_id, rx) = outgoing

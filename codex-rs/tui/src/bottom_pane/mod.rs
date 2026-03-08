@@ -26,7 +26,7 @@ use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
 use crate::tui::FrameRequester;
-use bottom_pane_view::BottomPaneView;
+use crate::tui::GamepadAction;
 use codex_core::features::Features;
 use codex_core::plugins::PluginCapabilitySummary;
 use codex_core::skills::model::SkillMetadata;
@@ -83,9 +83,12 @@ mod skill_popup;
 mod skills_toggle_view;
 mod slash_commands;
 pub(crate) use footer::CollaborationModeIndicator;
+pub(crate) use bottom_pane_view::BottomPaneView;
+pub(crate) use chat_composer::VoiceVisualState;
 pub(crate) use list_selection_view::ColumnWidthMode;
 pub(crate) use list_selection_view::SelectionViewParams;
 pub(crate) use list_selection_view::SideContentWidth;
+pub(crate) use scroll_state::ScrollState;
 pub(crate) use list_selection_view::popup_content_width;
 pub(crate) use list_selection_view::side_by_side_layout_widths;
 mod feedback_view;
@@ -356,6 +359,12 @@ impl BottomPane {
 
     fn active_view(&self) -> Option<&dyn BottomPaneView> {
         self.view_stack.last().map(std::convert::AsRef::as_ref)
+    }
+
+    pub(crate) fn active_view_gamepad_key(&self, action: GamepadAction) -> Option<KeyCode> {
+        self.view_stack
+            .last()
+            .and_then(|view| view.map_gamepad_action(action))
     }
 
     fn push_view(&mut self, view: Box<dyn BottomPaneView>) {
@@ -783,6 +792,24 @@ impl BottomPane {
         self.push_view(Box::new(view));
     }
 
+    pub(crate) fn replace_view_if_active(
+        &mut self,
+        view_id: &'static str,
+        view: Box<dyn BottomPaneView>,
+    ) -> bool {
+        let is_match = self
+            .view_stack
+            .last()
+            .is_some_and(|active| active.view_id() == Some(view_id));
+        if !is_match {
+            return false;
+        }
+
+        self.view_stack.pop();
+        self.push_view(view);
+        true
+    }
+
     /// Replace the active selection view when it matches `view_id`.
     pub(crate) fn replace_selection_view_if_active(
         &mut self,
@@ -1137,7 +1164,6 @@ impl BottomPane {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 impl BottomPane {
     pub(crate) fn insert_transcription_placeholder(&mut self, text: &str) -> String {
         let id = self.composer.insert_transcription_placeholder(text);
@@ -1164,6 +1190,19 @@ impl BottomPane {
     pub(crate) fn remove_transcription_placeholder(&mut self, id: &str) {
         self.composer.remove_transcription_placeholder(id);
         self.composer.sync_popups();
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_voice_visual_state(
+        &mut self,
+        state: crate::bottom_pane::chat_composer::VoiceVisualState,
+    ) {
+        self.composer.set_voice_visual_state(state);
+        self.request_redraw();
+    }
+
+    pub(crate) fn update_voice_visualizer(&mut self, visualizer: Option<String>) {
+        self.composer.update_voice_visualizer(visualizer);
         self.request_redraw();
     }
 }

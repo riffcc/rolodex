@@ -35,6 +35,7 @@ use crate::message_history::HistoryEntry;
 use crate::models::BaseInstructions;
 use crate::models::ContentItem;
 use crate::models::MessagePhase;
+use crate::models::PermissionProfile;
 use crate::models::ResponseItem;
 use crate::models::WebSearchAction;
 use crate::num_format::format_with_separators;
@@ -3038,6 +3039,12 @@ pub enum ReviewDecision {
     /// User has approved this command and the agent should execute it.
     Approved,
 
+    /// User has approved this command with a selected subset of the requested
+    /// additional permissions.
+    ApprovedAdditionalPermissions {
+        permission_profile: PermissionProfile,
+    },
+
     /// User has approved this command and wants to apply the proposed execpolicy
     /// amendment so future matching commands are permitted.
     ApprovedExecpolicyAmendment {
@@ -3071,6 +3078,9 @@ impl ReviewDecision {
     pub fn to_opaque_string(&self) -> &'static str {
         match self {
             ReviewDecision::Approved => "approved",
+            ReviewDecision::ApprovedAdditionalPermissions { .. } => {
+                "approved_with_additional_permissions"
+            }
             ReviewDecision::ApprovedExecpolicyAmendment { .. } => "approved_with_amendment",
             ReviewDecision::ApprovedForSession => "approved_for_session",
             ReviewDecision::NetworkPolicyAmendment {

@@ -545,6 +545,7 @@ async fn maybe_request_mcp_tool_approval(
     }
 
     let args = RequestUserInputArgs {
+        recursive: false,
         questions: vec![question],
     };
     let response = sess
@@ -643,6 +644,7 @@ fn build_guardian_mcp_tool_review_request(
 fn mcp_tool_approval_decision_from_guardian(decision: ReviewDecision) -> McpToolApprovalDecision {
     match decision {
         ReviewDecision::Approved
+        | ReviewDecision::ApprovedAdditionalPermissions { .. }
         | ReviewDecision::ApprovedExecpolicyAmendment { .. }
         | ReviewDecision::NetworkPolicyAmendment { .. } => McpToolApprovalDecision::Accept,
         ReviewDecision::ApprovedForSession => McpToolApprovalDecision::AcceptForSession,
@@ -792,7 +794,10 @@ fn build_mcp_tool_approval_question(
         id: question_id,
         header: "Approve app tool call?".to_string(),
         question,
+        allow_multiple: false,
         is_other: false,
+        other_label: None,
+        other_description: None,
         is_secret: false,
         options: Some(options),
     }

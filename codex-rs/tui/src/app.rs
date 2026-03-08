@@ -35,6 +35,7 @@ use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::Renderable;
 use crate::resume_picker::SessionSelection;
 use crate::tui;
+use crate::tui::GamepadAction;
 use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
 use crate::version::CODEX_CLI_VERSION;
@@ -95,13 +96,16 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::atomic::AtomicU16;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::select;
+use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -706,6 +710,8 @@ pub(crate) struct App {
     primary_thread_id: Option<ThreadId>,
     primary_session_configured: Option<SessionConfiguredEvent>,
     pending_primary_events: VecDeque<Event>,
+    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    handy_gamepad: HandyGamepadState,
 }
 
 #[derive(Default)]
@@ -713,6 +719,15 @@ struct WindowsSandboxState {
     setup_started_at: Option<Instant>,
     // One-shot suppression of the next world-writable scan after user confirmation.
     skip_world_writable_scan_once: bool,
+}
+
+#[cfg(all(target_os = "linux", feature = "voice-input"))]
+#[derive(Default)]
+struct HandyGamepadState {
+    continuous_mode: bool,
+    voice: Option<crate::voice::VoiceCapture>,
+    placeholder_id: Option<String>,
+    last_release_at: Option<Instant>,
 }
 
 fn normalize_harness_overrides_for_cwd(
@@ -1945,6 +1960,8 @@ impl App {
             primary_thread_id: None,
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
+            #[cfg(all(target_os = "linux", feature = "voice-input"))]
+            handy_gamepad: HandyGamepadState::default(),
         };
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
@@ -2091,6 +2108,9 @@ impl App {
                     // [iTerm2]: https://github.com/gnachman/iTerm2/blob/5d0c0d9f68523cbd0494dad5422998964a2ecd8d/sources/iTermPasteHelper.m#L206-L216
                     let pasted = pasted.replace("\r", "\n");
                     self.chat_widget.handle_paste(pasted);
+                }
+                TuiEvent::Gamepad(action) => {
+                    self.handle_gamepad_action(tui, action).await;
                 }
                 TuiEvent::Draw => {
                     if self.backtrack_render_pending {
@@ -3259,6 +3279,28 @@ impl App {
                 self.chat_widget
                     .submit_user_message_with_mode(text, collaboration_mode);
             }
+            AppEvent::SetComposerText { text } => {
+                self.chat_widget
+                    .set_composer_text(text, Vec::new(), Vec::new());
+            }
+            AppEvent::OpenTaskActionMenu { task_ids } => {
+                self.chat_widget.open_task_action_menu(task_ids);
+            }
+            AppEvent::LoadTaskPickerProject {
+                workspace,
+                project_slug,
+                project_name,
+            } => {
+                self.chat_widget.load_task_picker_project(
+                    workspace,
+                    project_slug,
+                    project_name,
+                );
+            }
+            AppEvent::TaskPickerPayloadLoaded { request_id, payload } => {
+                self.chat_widget
+                    .apply_task_picker_payload(request_id, payload);
+            }
             AppEvent::ManageSkillsClosed => {
                 self.chat_widget.handle_manage_skills_closed();
             }
@@ -3322,15 +3364,26 @@ impl App {
                     ));
                 }
             },
-            #[cfg(not(target_os = "linux"))]
             AppEvent::TranscriptionComplete { id, text } => {
                 self.chat_widget.replace_transcription(&id, &text);
+                #[cfg(all(target_os = "linux", feature = "voice-input"))]
+                if self.handy_gamepad.placeholder_id.as_deref() == Some(id.as_str()) {
+                    self.handy_gamepad.placeholder_id = None;
+                    if !self.handy_gamepad.continuous_mode {
+                        self.chat_widget.hide_voice_overlay();
+                    }
+                }
             }
-            #[cfg(not(target_os = "linux"))]
             AppEvent::TranscriptionFailed { id, error: _ } => {
                 self.chat_widget.remove_transcription_placeholder(&id);
+                #[cfg(all(target_os = "linux", feature = "voice-input"))]
+                if self.handy_gamepad.placeholder_id.as_deref() == Some(id.as_str()) {
+                    self.handy_gamepad.placeholder_id = None;
+                    if !self.handy_gamepad.continuous_mode {
+                        self.chat_widget.hide_voice_overlay();
+                    }
+                }
             }
-            #[cfg(not(target_os = "linux"))]
             AppEvent::UpdateRecordingMeter { id, text } => {
                 // Update in place to preserve the element id for subsequent frames.
                 let updated = self.chat_widget.update_transcription_in_place(&id, &text);
@@ -3816,6 +3869,206 @@ impl App {
                 self.chat_widget.handle_key_event(key_event);
             }
         };
+    }
+
+    async fn handle_gamepad_action(&mut self, tui: &mut tui::Tui, action: GamepadAction) {
+        let active_view_override = self.chat_widget.active_bottom_pane_gamepad_key(action);
+        let key_event = match action {
+            GamepadAction::Up => Some(KeyEvent::from(KeyCode::Up)),
+            GamepadAction::Down => Some(KeyEvent::from(KeyCode::Down)),
+            GamepadAction::Left => Some(KeyEvent::from(KeyCode::Left)),
+            GamepadAction::Right => Some(KeyEvent::from(KeyCode::Right)),
+            GamepadAction::Confirm => Some(KeyEvent::from(
+                active_view_override.unwrap_or(KeyCode::Enter),
+            )),
+            GamepadAction::Submit => Some(KeyEvent::from(KeyCode::Enter)),
+            GamepadAction::Cancel => Some(KeyEvent::from(KeyCode::Esc)),
+            GamepadAction::Context => active_view_override.map(KeyEvent::from),
+            GamepadAction::Alternate => Some(KeyEvent::from(
+                active_view_override.unwrap_or(KeyCode::Char(' ')),
+            )),
+            GamepadAction::PreviousPage => Some(KeyEvent::from(KeyCode::PageUp)),
+            GamepadAction::NextPage => Some(KeyEvent::from(KeyCode::PageDown)),
+            GamepadAction::FocusPrevious => Some(KeyEvent::from(KeyCode::BackTab)),
+            GamepadAction::FocusNext => Some(KeyEvent::from(KeyCode::Tab)),
+            GamepadAction::PushToTalkStart => {
+                self.handle_handy_push_to_talk(true);
+                None
+            }
+            GamepadAction::PushToTalkStop => {
+                self.handle_handy_push_to_talk(false);
+                None
+            }
+        };
+
+        if let Some(key_event) = key_event {
+            self.handle_key_event(tui, key_event).await;
+        }
+    }
+
+    fn handle_handy_push_to_talk(&mut self, pressed: bool) {
+        #[cfg(all(target_os = "linux", feature = "voice-input"))]
+        {
+            const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(350);
+            let now = Instant::now();
+
+            if pressed {
+                let is_double_tap = self
+                    .handy_gamepad
+                    .last_release_at
+                    .is_some_and(|last| now.saturating_duration_since(last) <= DOUBLE_TAP_WINDOW);
+
+                if is_double_tap {
+                    self.handy_gamepad.last_release_at = None;
+                    self.toggle_handy_continuous_mode();
+                    return;
+                }
+
+                if !self.handy_gamepad.continuous_mode {
+                    self.start_handy_recording();
+                }
+                return;
+            }
+
+            self.handy_gamepad.last_release_at = Some(now);
+            if !self.handy_gamepad.continuous_mode {
+                self.stop_handy_recording();
+            }
+        }
+
+        #[cfg(not(all(target_os = "linux", feature = "voice-input")))]
+        {
+            let _ = pressed;
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    fn toggle_handy_continuous_mode(&mut self) {
+        self.handy_gamepad.continuous_mode = !self.handy_gamepad.continuous_mode;
+        if self.handy_gamepad.continuous_mode {
+            Self::play_handy_chime();
+            self.chat_widget.show_voice_overlay(
+                "Continuous Voice".to_string(),
+                Some("Back twice to stop. Speech stays local via Handy.".to_string()),
+            );
+            self.start_handy_recording();
+        } else {
+            self.stop_handy_recording();
+            self.chat_widget.hide_voice_overlay();
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    fn start_handy_recording(&mut self) {
+        if self.handy_gamepad.voice.is_some() {
+            return;
+        }
+
+        match crate::voice::VoiceCapture::start() {
+            Ok(voice) => {
+                Self::play_handy_chime();
+                let placeholder_id = self.chat_widget.insert_transcription_placeholder("");
+                self.spawn_handy_recording_meter(
+                    placeholder_id.clone(),
+                    voice.last_peak_arc(),
+                    voice.stopped_flag(),
+                );
+                self.handy_gamepad.voice = Some(voice);
+                self.handy_gamepad.placeholder_id = Some(placeholder_id);
+
+                if self.handy_gamepad.continuous_mode {
+                    self.chat_widget.show_voice_overlay(
+                        "Continuous Voice".to_string(),
+                        Some("Listening locally. Back twice to stop.".to_string()),
+                    );
+                }
+            }
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to start Handy voice capture: {err}"));
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    fn stop_handy_recording(&mut self) {
+        let Some(voice) = self.handy_gamepad.voice.take() else {
+            return;
+        };
+
+        let placeholder_id = self
+            .handy_gamepad
+            .placeholder_id
+            .clone()
+            .unwrap_or_else(|| self.chat_widget.insert_transcription_placeholder(""));
+
+        match voice.stop() {
+            Ok(audio) => {
+                let total_samples = audio.data.len() as f32;
+                let samples_per_second = (audio.sample_rate as f32) * (audio.channels as f32);
+                let duration_seconds = if samples_per_second > 0.0 {
+                    total_samples / samples_per_second
+                } else {
+                    0.0
+                };
+                if duration_seconds < 0.25 {
+                    self.chat_widget
+                        .remove_transcription_placeholder(&placeholder_id);
+                    self.handy_gamepad.placeholder_id = None;
+                    if !self.handy_gamepad.continuous_mode {
+                        self.chat_widget.hide_voice_overlay();
+                    }
+                    return;
+                }
+
+                let prompt_source = self.chat_widget.composer_text();
+                crate::voice::transcribe_async(
+                    placeholder_id,
+                    audio,
+                    Some(prompt_source),
+                    self.app_event_tx.clone(),
+                );
+            }
+            Err(err) => {
+                self.chat_widget
+                    .remove_transcription_placeholder(&placeholder_id);
+                self.handy_gamepad.placeholder_id = None;
+                self.chat_widget
+                    .add_error_message(format!("Failed to stop Handy voice capture: {err}"));
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    fn spawn_handy_recording_meter(
+        &self,
+        id: String,
+        last_peak: Arc<AtomicU16>,
+        stop: Arc<AtomicBool>,
+    ) {
+        let tx = self.app_event_tx.clone();
+        let task = move || {
+            let mut meter = crate::voice::RecordingMeterState::new();
+            while !stop.load(Ordering::Relaxed) {
+                tx.send(AppEvent::UpdateRecordingMeter {
+                    id: id.clone(),
+                    text: meter.next_text(last_peak.load(Ordering::Relaxed)),
+                });
+                thread::sleep(Duration::from_millis(100));
+            }
+        };
+
+        if let Ok(handle) = Handle::try_current() {
+            handle.spawn_blocking(task);
+        } else {
+            thread::spawn(task);
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    fn play_handy_chime() {
+        let _ = std::io::stderr().write_all(b"\x07");
+        let _ = std::io::stderr().flush();
     }
 
     fn refresh_status_line(&mut self) {
@@ -5606,6 +5859,8 @@ mod tests {
             primary_thread_id: None,
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
+            #[cfg(all(target_os = "linux", feature = "voice-input"))]
+            handy_gamepad: HandyGamepadState::default(),
         }
     }
 
@@ -5666,6 +5921,8 @@ mod tests {
                 primary_thread_id: None,
                 primary_session_configured: None,
                 pending_primary_events: VecDeque::new(),
+                #[cfg(all(target_os = "linux", feature = "voice-input"))]
+                handy_gamepad: HandyGamepadState::default(),
             },
             rx,
             op_rx,

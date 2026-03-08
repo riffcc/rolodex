@@ -428,6 +428,7 @@ async fn handle_request_user_input(
     cancel_token: &CancellationToken,
 ) {
     let args = RequestUserInputArgs {
+        recursive: event.recursive,
         questions: event.questions,
     };
     let response_fut =

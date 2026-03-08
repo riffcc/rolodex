@@ -108,6 +108,7 @@ impl ToolOrchestrator {
         approval_policy: AskForApproval,
     ) -> Result<OrchestratorRunResult<Out>, ToolError>
     where
+        Rq: Clone,
         T: ToolRuntime<Rq, Out>,
     {
         let otel = turn_ctx.session_telemetry.clone();
@@ -122,6 +123,7 @@ impl ToolOrchestrator {
         let requirement = tool.exec_approval_requirement(req).unwrap_or_else(|| {
             default_exec_approval_requirement(approval_policy, &turn_ctx.sandbox_policy)
         });
+        let mut approved_req = req.clone();
         match requirement {
             ExecApprovalRequirement::Skip { .. } => {
                 otel.tool_decision(otel_tn, otel_ci, &ReviewDecision::Approved, otel_cfg);
@@ -140,6 +142,7 @@ impl ToolOrchestrator {
                 let decision = tool.start_approval_async(req, approval_ctx).await;
 
                 otel.tool_decision(otel_tn, otel_ci, &decision, otel_user.clone());
+                approved_req = tool.apply_approval_decision(req, &decision);
 
                 match decision {
                     ReviewDecision::Denied | ReviewDecision::Abort => {
@@ -151,6 +154,7 @@ impl ToolOrchestrator {
                         return Err(ToolError::Rejected(reason));
                     }
                     ReviewDecision::Approved
+                    | ReviewDecision::ApprovedAdditionalPermissions { .. }
                     | ReviewDecision::ApprovedExecpolicyAmendment { .. }
                     | ReviewDecision::ApprovedForSession => {}
                     ReviewDecision::NetworkPolicyAmendment {
@@ -202,7 +206,7 @@ impl ToolOrchestrator {
 
         let (first_result, first_deferred_network_approval) = Self::run_attempt(
             tool,
-            req,
+            &approved_req,
             tool_ctx,
             &initial_attempt,
             has_managed_network_requirements,
@@ -285,6 +289,7 @@ impl ToolOrchestrator {
 
                     let decision = tool.start_approval_async(req, approval_ctx).await;
                     otel.tool_decision(otel_tn, otel_ci, &decision, otel_user);
+                    approved_req = tool.apply_approval_decision(req, &decision);
 
                     match decision {
                         ReviewDecision::Denied | ReviewDecision::Abort => {
@@ -296,6 +301,7 @@ impl ToolOrchestrator {
                             return Err(ToolError::Rejected(reason));
                         }
                         ReviewDecision::Approved
+                        | ReviewDecision::ApprovedAdditionalPermissions { .. }
                         | ReviewDecision::ApprovedExecpolicyAmendment { .. }
                         | ReviewDecision::ApprovedForSession => {}
                         ReviewDecision::NetworkPolicyAmendment {
@@ -325,7 +331,7 @@ impl ToolOrchestrator {
                 // Second attempt.
                 let (retry_result, retry_deferred_network_approval) = Self::run_attempt(
                     tool,
-                    req,
+                    &approved_req,
                     tool_ctx,
                     &escalated_attempt,
                     has_managed_network_requirements,

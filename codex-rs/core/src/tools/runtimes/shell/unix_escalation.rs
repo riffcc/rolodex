@@ -433,6 +433,11 @@ impl CoreShellActionProvider {
                     .await;
                 }
                 let available_decisions = vec![
+                    additional_permissions.as_ref().map(|permission_profile| {
+                        ReviewDecision::ApprovedAdditionalPermissions {
+                            permission_profile: permission_profile.clone(),
+                        }
+                    }),
                     Some(ReviewDecision::Approved),
                     // Currently, ApprovedForSession is only honored for skills,
                     // so only offer it for skill script approvals.
@@ -536,6 +541,17 @@ impl CoreShellActionProvider {
                         | ReviewDecision::ApprovedExecpolicyAmendment { .. } => {
                             if needs_escalation {
                                 EscalationDecision::escalate(escalation_execution.clone())
+                            } else {
+                                EscalationDecision::run()
+                            }
+                        }
+                        ReviewDecision::ApprovedAdditionalPermissions { permission_profile } => {
+                            if permission_profile.is_empty() {
+                                EscalationDecision::deny(Some("User denied execution".to_string()))
+                            } else if needs_escalation {
+                                EscalationDecision::escalate(EscalationExecution::Permissions(
+                                    EscalationPermissions::PermissionProfile(permission_profile),
+                                ))
                             } else {
                                 EscalationDecision::run()
                             }

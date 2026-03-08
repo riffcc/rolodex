@@ -21,6 +21,7 @@ use codex_utils_approval_presets::ApprovalPreset;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::history_cell::HistoryCell;
+use crate::task_picker::TaskPickerPayload;
 
 use codex_core::features::Feature;
 use codex_protocol::config_types::CollaborationModeMask;
@@ -383,21 +384,18 @@ pub(crate) enum AppEvent {
 
     /// Live update for the in-progress voice recording placeholder. Carries
     /// the placeholder `id` and the text to display (e.g., an ASCII meter).
-    #[cfg(not(target_os = "linux"))]
     UpdateRecordingMeter {
         id: String,
         text: String,
     },
 
     /// Voice transcription finished for the given placeholder id.
-    #[cfg(not(target_os = "linux"))]
     TranscriptionComplete {
         id: String,
         text: String,
     },
 
     /// Voice transcription failed; remove the placeholder identified by `id`.
-    #[cfg(not(target_os = "linux"))]
     TranscriptionFailed {
         id: String,
         #[allow(dead_code)]
@@ -417,6 +415,29 @@ pub(crate) enum AppEvent {
     SubmitUserMessageWithMode {
         text: String,
         collaboration_mode: CollaborationModeMask,
+    },
+
+    /// Replace the current composer text without sending it.
+    SetComposerText {
+        text: String,
+    },
+
+    /// Open the task action menu for the provided task ids.
+    OpenTaskActionMenu {
+        task_ids: Vec<String>,
+    },
+
+    /// Load Plane issues for the selected project into the task picker.
+    LoadTaskPickerProject {
+        workspace: String,
+        project_slug: String,
+        project_name: String,
+    },
+
+    /// Async task-picker payload update for the currently open /tasks view.
+    TaskPickerPayloadLoaded {
+        request_id: u64,
+        payload: TaskPickerPayload,
     },
 
     /// Open the approval popup.
