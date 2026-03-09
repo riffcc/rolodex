@@ -62,7 +62,7 @@ image = { workspace = true, features = ["jpeg", "png", "gif", "webp"] }
 itertools = { workspace = true }
 lazy_static = { workspace = true }
 pathdiff = { workspace = true }
-palace-plane = { path = "/mnt/riffcastle/castle/garage/palace-2026-v2/crates/palace-plane" }
+palace-plane = { git = "https://github.com/riffcc/palace.git", rev = "ef7ee97f71c833d2963f1fe922840ce709f6b79b", package = "palace-plane" }
 pulldown-cmark = { workspace = true }
 rand = { workspace = true }
 ratatui = { workspace = true, features = [
@@ -115,7 +115,7 @@ tokio-util = { workspace = true, features = ["time"] }
 libc = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-handy-core = { path = "../../../Handy/handy-core" }
+handy-core = { git = "https://github.com/riffcc/Handy.git", rev = "a31587cf737803c88c7d7fe80825e1b756d48912", package = "handy-core" }
 
 [target.'cfg(windows)'.dependencies]
 which = { workspace = true }

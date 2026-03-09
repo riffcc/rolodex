@@ -940,29 +940,6 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.69.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "271383c67ccabffb7381723dea0672a673f292304fcb45c01cc648c7a8d58088"
-dependencies = [
- "bitflags 2.10.0",
- "cexpr",
- "clang-sys",
- "itertools 0.10.5",
- "lazy_static",
- "lazycell",
- "log",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 1.1.0",
- "shlex",
- "syn 2.0.114",
- "which 4.4.2",
-]
-
-[[package]]
-name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
@@ -1595,7 +1572,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
- "which 8.0.0",
+ "which",
  "wiremock",
  "zip",
 ]
@@ -1918,7 +1895,7 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
- "which 8.0.0",
+ "which",
  "wildmatch",
  "windows-sys 0.52.0",
  "wiremock",
@@ -2129,7 +2106,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "which 8.0.0",
+ "which",
  "wiremock",
 ]
 
@@ -2367,7 +2344,7 @@ dependencies = [
  "tracing",
  "urlencoding",
  "webbrowser",
- "which 8.0.0",
+ "which",
 ]
 
 [[package]]
@@ -2407,7 +2384,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
  "url",
- "which 8.0.0",
+ "which",
 ]
 
 [[package]]
@@ -2569,7 +2546,7 @@ dependencies = [
  "uuid",
  "vt100",
  "webbrowser",
- "which 8.0.0",
+ "which",
  "windows-sys 0.52.0",
  "winsplit",
 ]
@@ -2987,7 +2964,7 @@ version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ceec7a6067e62d6f931a2baf6f3a751f4a892595bcec1461a3c94ef9949864b6"
 dependencies = [
- "bindgen 0.72.1",
+ "bindgen",
 ]
 
 [[package]]
@@ -4506,6 +4483,7 @@ dependencies = [
 [[package]]
 name = "handy-core"
 version = "0.1.0"
+source = "git+https://github.com/riffcc/Handy.git?rev=a31587cf737803c88c7d7fe80825e1b756d48912#a31587cf737803c88c7d7fe80825e1b756d48912"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -5544,12 +5522,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lazycell"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
-
-[[package]]
 name = "libc"
 version = "0.2.182"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5660,6 +5632,7 @@ checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 [[package]]
 name = "llm-code-sdk"
 version = "0.1.0"
+source = "git+https://github.com/riffcc/palace.git?rev=ef7ee97f71c833d2963f1fe922840ce709f6b79b#ef7ee97f71c833d2963f1fe922840ce709f6b79b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5928,15 +5901,6 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
-
-[[package]]
-name = "minirust-search"
-version = "0.1.0"
-dependencies = [
- "clap",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "miniz_oxide"
@@ -6863,13 +6827,13 @@ dependencies = [
 [[package]]
 name = "palace-plane"
 version = "0.1.0"
+source = "git+https://github.com/riffcc/palace.git?rev=ef7ee97f71c833d2963f1fe922840ce709f6b79b#ef7ee97f71c833d2963f1fe922840ce709f6b79b"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
  "dirs 5.0.1",
  "llm-code-sdk",
- "minirust-search",
  "regex",
  "reqwest",
  "serde",
@@ -7236,25 +7200,6 @@ checksum = "3ae130e2f271fbc2ac3a40fb1d07180839cdbbe443c7a27e1e3c13c5cac0116d"
 dependencies = [
  "diff",
  "yansi",
-]
-
-[[package]]
-name = "prettyplease"
-version = "0.2.37"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
-dependencies = [
- "proc-macro2",
- "syn 2.0.114",
-]
-
-[[package]]
-name = "primal-check"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc0d895b311e3af9902528fbb8f928688abbd95872819320517cc24ca6b2bd08"
-dependencies = [
- "num-integer",
 ]
 
 [[package]]
@@ -8258,20 +8203,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
-]
-
-[[package]]
-name = "rustfft"
-version = "6.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21db5f9893e91f41798c88680037dba611ca6674703c1a18601b01a72c8adb89"
-dependencies = [
- "num-complex",
- "num-integer",
- "num-traits",
- "primal-check",
- "strength_reduce",
- "transpose",
 ]
 
 [[package]]
@@ -9513,12 +9444,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
 
 [[package]]
-name = "strength_reduce"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
-
-[[package]]
 name = "string_cache"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10410,7 +10335,6 @@ version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6fe25a69f6aa6ca4a8cb1dfc201e94c4cc7acb43f69353aa9ebb6aa4d0d26a9"
 dependencies = [
- "base64 0.22.1",
  "derive_builder",
  "env_logger 0.10.2",
  "hound",
@@ -10419,21 +10343,9 @@ dependencies = [
  "once_cell",
  "ort",
  "regex",
- "rustfft",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "whisper-rs",
-]
-
-[[package]]
-name = "transpose"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ad61aed86bc3faea4300c7aee358b4c6d0c8d6ccc36524c96e4c92ccf26e77e"
-dependencies = [
- "num-integer",
- "strength_reduce",
 ]
 
 [[package]]
@@ -10489,6 +10401,7 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 [[package]]
 name = "tree-sitter-lean"
 version = "0.1.0"
+source = "git+https://github.com/riffcc/tree-sitter-lean.git?rev=8c4fa06ae0ac526d66d2276997c6c5de61343f44#8c4fa06ae0ac526d66d2276997c6c5de61343f44"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -10497,6 +10410,7 @@ dependencies = [
 [[package]]
 name = "tree-sitter-nim"
 version = "0.6.2"
+source = "git+https://github.com/riffcc/tree-sitter-nim.git?rev=1fbd0b4017019981294f5fd7bac584e82ba188e2#1fbd0b4017019981294f5fd7bac584e82ba188e2"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -11164,18 +11078,6 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "which"
-version = "4.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87ba24419a2078cd2b0f2ede2691b6c66d8e47836da3b6db8265ebad47afbfc7"
-dependencies = [
- "either",
- "home",
- "once_cell",
- "rustix 0.38.44",
-]
-
-[[package]]
-name = "which"
 version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fabb953106c3c8eea8306e4393700d7657561cb43122571b172bbfb7c7ba1d"
@@ -11183,27 +11085,6 @@ dependencies = [
  "env_home",
  "rustix 1.1.3",
  "winsafe",
-]
-
-[[package]]
-name = "whisper-rs"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40b6fc553156b521663bfa8e713e7ad58c7ca262d46de9998cd7f2e4de5ba0d9"
-dependencies = [
- "whisper-rs-sys",
-]
-
-[[package]]
-name = "whisper-rs-sys"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76bab42b2c319e3a1e0280137c59368072348d3277873c7588b6466a127dca58"
-dependencies = [
- "bindgen 0.69.5",
- "cfg-if",
- "cmake",
- "fs_extra",
 ]
 
 [[package]]

@@ -42,16 +42,12 @@ const DEFAULT_WORKSPACE: &str = "riffcc";
 #[derive(Clone, Debug)]
 pub(crate) enum TaskSource {
     Plane,
-    Github,
-    Agents,
 }
 
 impl TaskSource {
     fn label(&self) -> &'static str {
         match self {
             Self::Plane => "Plane",
-            Self::Github => "GitHub",
-            Self::Agents => "Agents",
         }
     }
 }
@@ -59,7 +55,6 @@ impl TaskSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TaskKind {
     RealIssue,
-    Summary,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1081,21 +1076,17 @@ async fn load_project_tasks(cwd: &Path, config: ProjectConfig) -> anyhow::Result
 
     let client = PlaneClient::new().context("Failed to initialize Plane client")?;
     let issues = client
-        .list_all_issues(&config)
+        .list_active_issues(&config)
         .await
         .with_context(|| format!("Failed to list issues for {}/{}", config.workspace, config.project_slug))?;
 
     let branch = codex_core::git_info::current_branch_name(cwd).await;
-    let mut issue_tasks = issues
+    let mut tasks = issues
         .into_iter()
         .map(|issue| issue_to_task_item(&config, issue, branch.clone()))
         .collect::<Vec<_>>();
 
-    issue_tasks.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
-
-    let synthetic = build_synthetic_summary_rows(cwd, &config, &issue_tasks).await;
-    let mut tasks = synthetic;
-    tasks.extend(issue_tasks);
+    tasks.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
 
     Ok(TaskPickerPayload::TaskList {
         workspace: config.workspace,
@@ -1197,138 +1188,6 @@ fn task_state_from_plane_state(state: Option<&str>) -> TaskState {
         TaskState::Done
     } else {
         TaskState::Ready
-    }
-}
-
-async fn build_synthetic_summary_rows(
-    cwd: &Path,
-    config: &ProjectConfig,
-    issue_tasks: &[TaskItem],
-) -> Vec<TaskItem> {
-    let board = build_plane_board_summary(config, issue_tasks);
-    let git = build_github_summary(cwd, config.project_slug.as_str()).await;
-    let agents = build_agents_summary();
-    vec![board, git, agents]
-}
-
-fn build_plane_board_summary(config: &ProjectConfig, issue_tasks: &[TaskItem]) -> TaskItem {
-    let total = issue_tasks.len();
-    let in_progress = issue_tasks
-        .iter()
-        .filter(|task| task.state == TaskState::InProgress)
-        .count();
-    let blocked = issue_tasks
-        .iter()
-        .filter(|task| task.state == TaskState::Blocked)
-        .count();
-    let ready = issue_tasks
-        .iter()
-        .filter(|task| task.state == TaskState::Ready)
-        .count();
-    let done = issue_tasks
-        .iter()
-        .filter(|task| task.state == TaskState::Done)
-        .count();
-
-    TaskItem {
-        id: "summary:plane-board".to_string(),
-        title: "Plane: Show board for the current project".to_string(),
-        summary: format!(
-            "{total} issues: {in_progress} in progress, {blocked} blocked, {ready} ready, {done} done"
-        ),
-        details: vec![
-            format!("Workspace: {}", config.workspace),
-            format!("Project: {}", config.project_slug),
-            "This summary row is synthetic and stable across task picker loads.".to_string(),
-            "Recent change ordering is not wired yet because the current Palace Plane client does not expose updated timestamps here.".to_string(),
-        ],
-        prompt: format!(
-            "Summarize the current board for {}/{} with counts by state, highlight blockers, summarize CI/CD context, and recommend the next issue lane to focus.",
-            config.workspace, config.project_slug
-        ),
-        source: TaskSource::Plane,
-        state: if in_progress > 0 {
-            TaskState::InProgress
-        } else {
-            TaskState::Ready
-        },
-        branch: None,
-        ci_status: Some("Derived from active Plane issues".to_string()),
-        plane_issue_id: None,
-        kind: TaskKind::Summary,
-    }
-}
-
-async fn build_github_summary(cwd: &Path, project_slug: &str) -> TaskItem {
-    let branch = codex_core::git_info::current_branch_name(cwd).await;
-    let dirty = codex_core::git_info::get_has_changes(cwd).await;
-    let latest_commit = codex_core::git_info::recent_commits(cwd, 1)
-        .await
-        .into_iter()
-        .next();
-
-    let branch_text = branch.clone().unwrap_or_else(|| "(unknown branch)".to_string());
-    let dirty_text = match dirty {
-        Some(true) => "dirty",
-        Some(false) => "clean",
-        None => "unknown",
-    };
-
-    let (summary, latest_detail) = match latest_commit {
-        Some(commit) => {
-            let short_sha = commit.sha.chars().take(7).collect::<String>();
-            (
-                format!(
-                    "Branch {branch_text} is {dirty_text}; latest commit {short_sha} {}",
-                    commit.subject
-                ),
-                format!("Latest commit: {short_sha} {}", commit.subject),
-            )
-        }
-        None => (
-            format!("Branch {branch_text} is {dirty_text}; latest commit unavailable"),
-            "Latest commit: unavailable".to_string(),
-        ),
-    };
-
-    TaskItem {
-        id: "summary:github-ci".to_string(),
-        title: "GitHub: Check branch and CI health".to_string(),
-        summary,
-        details: vec![
-            latest_detail,
-            format!("Project context: {project_slug}"),
-            "CI/CD signal is not wired yet in this picker, so status is shown as unknown.".to_string(),
-        ],
-        prompt: format!(
-            "Check git and CI/CD readiness for branch {branch_text}. Summarize dirty/clean status, latest commit context, and any obvious release blockers."
-        ),
-        source: TaskSource::Github,
-        state: TaskState::Ready,
-        branch,
-        ci_status: Some("Unknown (not wired)".to_string()),
-        plane_issue_id: None,
-        kind: TaskKind::Summary,
-    }
-}
-
-fn build_agents_summary() -> TaskItem {
-    TaskItem {
-        id: "summary:agents".to_string(),
-        title: "Agents: Review active workers".to_string(),
-        summary: "Active worker review is not wired yet in this task picker.".to_string(),
-        details: vec![
-            "No live worker data source is connected here yet.".to_string(),
-            "This synthetic row remains stable so users can keep the same task selection habits."
-                .to_string(),
-        ],
-        prompt: "Review current agent/worker activity, identify blockers, and recommend whether to wait, abort, or spawn additional support.".to_string(),
-        source: TaskSource::Agents,
-        state: TaskState::Blocked,
-        branch: None,
-        ci_status: Some("Unknown (not wired)".to_string()),
-        plane_issue_id: None,
-        kind: TaskKind::Summary,
     }
 }
 
