@@ -54,6 +54,10 @@ pub(crate) fn with_config_overrides(mut model: ModelInfo, config: &Config) -> Mo
         model.model_messages = None;
     }
 
+    if model.experimental_supported_tools.is_empty() {
+        model.experimental_supported_tools = default_experimental_supported_tools_for_slug(&model.slug);
+    }
+
     model
 }
 
@@ -86,10 +90,22 @@ pub(crate) fn model_info_from_slug(slug: &str) -> ModelInfo {
         context_window: Some(272_000),
         auto_compact_token_limit: None,
         effective_context_window_percent: 95,
-        experimental_supported_tools: Vec::new(),
+        experimental_supported_tools: default_experimental_supported_tools_for_slug(slug),
         input_modalities: default_input_modalities(),
         prefer_websockets: false,
         used_fallback_model_metadata: true, // this is the fallback model metadata
+    }
+}
+
+fn default_experimental_supported_tools_for_slug(slug: &str) -> Vec<String> {
+    if slug.starts_with("gpt-5") {
+        vec![
+            "grep_files".to_string(),
+            "read_file".to_string(),
+            "list_dir".to_string(),
+        ]
+    } else {
+        Vec::new()
     }
 }
 
@@ -149,5 +165,36 @@ mod tests {
         let updated = with_config_overrides(model.clone(), &config);
 
         assert_eq!(updated, model);
+    }
+
+    #[test]
+    fn fallback_gpt5_models_enable_enhanced_file_tools() {
+        let model = model_info_from_slug("gpt-5.4");
+        assert_eq!(
+            model.experimental_supported_tools,
+            vec![
+                "grep_files".to_string(),
+                "read_file".to_string(),
+                "list_dir".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn config_overrides_backfill_enhanced_file_tools_when_missing() {
+        let mut model = model_info_from_slug("gpt-5.4");
+        model.experimental_supported_tools = Vec::new();
+        let config = test_config();
+
+        let updated = with_config_overrides(model, &config);
+
+        assert_eq!(
+            updated.experimental_supported_tools,
+            vec![
+                "grep_files".to_string(),
+                "read_file".to_string(),
+                "list_dir".to_string(),
+            ]
+        );
     }
 }
