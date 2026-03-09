@@ -26,6 +26,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use tracing::error;
+use tracing::info;
 use tracing::trace;
 
 const AUDIO_MODEL: &str = "gpt-4o-mini-transcribe";
