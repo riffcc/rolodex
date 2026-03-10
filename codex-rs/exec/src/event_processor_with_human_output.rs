@@ -438,6 +438,34 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     }
                 }
             }
+            EventMsg::FunctionToolCallBegin(ev) => {
+                ts_msg!(
+                    self,
+                    "{} {}",
+                    "tool".style(self.magenta),
+                    ev.tool_name.style(self.bold)
+                );
+                if !ev.input.trim().is_empty() {
+                    eprintln!("{}", ev.input.style(self.dimmed));
+                }
+            }
+            EventMsg::FunctionToolCallEnd(ev) => {
+                let is_success = ev.output.success.unwrap_or(true);
+                let duration = format!(" in {}", format_duration(ev.duration));
+                let status_str = if is_success { "success" } else { "failed" };
+                let title_style = if is_success { self.green } else { self.red };
+                let title = format!("{} {status_str}{duration}:", ev.tool_name);
+
+                ts_msg!(self, "{}", title.style(title_style));
+
+                if let Some(text) = ev.output.body.to_text()
+                    && !text.trim().is_empty()
+                {
+                    for line in text.lines().take(MAX_OUTPUT_LINES_FOR_EXEC_TOOL_CALL) {
+                        eprintln!("{}", line.style(self.dimmed));
+                    }
+                }
+            }
             EventMsg::WebSearchBegin(_) => {
                 ts_msg!(self, "🌐 Searching the web...");
             }

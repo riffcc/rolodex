@@ -2270,48 +2270,32 @@ pub(crate) fn build_specs(
         builder.register_handler("apply_patch", apply_patch_handler);
     }
 
-    if config
-        .experimental_supported_tools
-        .contains(&"grep_files".to_string())
-    {
-        let grep_files_handler = Arc::new(GrepFilesHandler);
-        push_tool_spec(
-            &mut builder,
-            create_grep_files_tool(),
-            true,
-            config.code_mode_enabled,
-        );
-        builder.register_handler("grep_files", grep_files_handler);
-    }
+    let grep_files_handler = Arc::new(GrepFilesHandler);
+    push_tool_spec(
+        &mut builder,
+        create_grep_files_tool(),
+        true,
+        config.code_mode_enabled,
+    );
+    builder.register_handler("grep_files", grep_files_handler);
 
-    if config
-        .experimental_supported_tools
-        .contains(&"read_file".to_string())
-    {
-        let read_file_handler = Arc::new(ReadFileHandler);
-        push_tool_spec(
-            &mut builder,
-            create_read_file_tool(),
-            true,
-            config.code_mode_enabled,
-        );
-        builder.register_handler("read_file", read_file_handler);
-    }
+    let read_file_handler = Arc::new(ReadFileHandler);
+    push_tool_spec(
+        &mut builder,
+        create_read_file_tool(),
+        true,
+        config.code_mode_enabled,
+    );
+    builder.register_handler("read_file", read_file_handler);
 
-    if config
-        .experimental_supported_tools
-        .iter()
-        .any(|tool| tool == "list_dir")
-    {
-        let list_dir_handler = Arc::new(ListDirHandler);
-        push_tool_spec(
-            &mut builder,
-            create_list_dir_tool(),
-            true,
-            config.code_mode_enabled,
-        );
-        builder.register_handler("list_dir", list_dir_handler);
-    }
+    let list_dir_handler = Arc::new(ListDirHandler);
+    push_tool_spec(
+        &mut builder,
+        create_list_dir_tool(),
+        true,
+        config.code_mode_enabled,
+    );
+    builder.register_handler("list_dir", list_dir_handler);
 
     if config
         .experimental_supported_tools
@@ -3796,6 +3780,36 @@ mod tests {
     }
 
     #[test]
+    fn test_read_file_tool_advertises_protocol_map_first() {
+        let read_tool = create_read_file_tool();
+        let ToolSpec::Function(tool) = read_tool else {
+            panic!("read_file tool should be a function tool");
+        };
+
+        assert!(tool.description.contains("protocol_map"));
+        assert!(tool.description.contains("Prefer `map: { preset: \"protocol_map\" }`"));
+        assert!(tool.description.contains("actor graph"));
+    }
+
+    #[test]
+    fn test_enhanced_file_tools_are_available_without_experimental_tool_metadata() {
+        let mut model_info = model_info_from_models_json("gpt-5.4");
+        model_info.experimental_supported_tools = Vec::new();
+        let features = Features::with_defaults();
+        let available_models = Vec::new();
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            available_models: &available_models,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Cached),
+            session_source: SessionSource::Cli,
+        });
+        let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
+
+        assert!(tools.iter().any(|tool| tool_name(&tool.spec) == "read_file"));
+        assert!(tools.iter().any(|tool| tool_name(&tool.spec) == "grep_files"));
+        assert!(tools.iter().any(|tool| tool_name(&tool.spec) == "list_dir"));
+    }
     fn test_build_specs_mcp_tools_converted() {
         let config = test_config();
         let model_info = ModelsManager::construct_model_info_offline_for_tests("o3", &config);

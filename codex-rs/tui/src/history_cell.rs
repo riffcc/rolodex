@@ -47,6 +47,7 @@ use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::mcp::Resource;
 use codex_protocol::mcp::ResourceTemplate;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::WebSearchAction;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -1532,6 +1533,130 @@ pub(crate) fn new_active_mcp_tool_call(
     animations_enabled: bool,
 ) -> McpToolCallCell {
     McpToolCallCell::new(call_id, invocation, animations_enabled)
+}
+
+#[derive(Debug)]
+pub(crate) struct FunctionToolCallCell {
+    call_id: String,
+    tool_name: String,
+    input: String,
+    start_time: Instant,
+    duration: Option<Duration>,
+    output: Option<FunctionCallOutputPayload>,
+    animations_enabled: bool,
+}
+
+impl FunctionToolCallCell {
+    pub(crate) fn new(
+        call_id: String,
+        tool_name: String,
+        input: String,
+        animations_enabled: bool,
+    ) -> Self {
+        Self {
+            call_id,
+            tool_name,
+            input,
+            start_time: Instant::now(),
+            duration: None,
+            output: None,
+            animations_enabled,
+        }
+    }
+
+    pub(crate) fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    pub(crate) fn complete(&mut self, duration: Duration, output: FunctionCallOutputPayload) {
+        self.duration = Some(duration);
+        self.output = Some(output);
+    }
+
+    pub(crate) fn mark_failed(&mut self) {
+        if self.output.is_none() {
+            self.duration = Some(self.start_time.elapsed());
+            self.output = Some(FunctionCallOutputPayload::from_text("interrupted".to_string()));
+            if let Some(output) = self.output.as_mut() {
+                output.success = Some(false);
+            }
+        }
+    }
+
+    fn success(&self) -> Option<bool> {
+        self.output.as_ref().and_then(|output| output.success)
+    }
+}
+
+impl HistoryCell for FunctionToolCallCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let status = self.success();
+        let bullet = match status {
+            Some(true) => "•".green().bold(),
+            Some(false) => "•".red().bold(),
+            None => spinner(Some(self.start_time), self.animations_enabled),
+        };
+        let header_text = if status.is_some() { "Called" } else { "Calling" };
+
+        let compact_header = Line::from(vec![
+            bullet,
+            " ".into(),
+            header_text.bold(),
+            " ".into(),
+            self.tool_name.clone().into(),
+        ]);
+        lines.push(compact_header);
+
+        let detail_wrap_width = (width as usize).saturating_sub(4).max(1);
+        let input_text =
+            format_and_truncate_tool_result(&self.input, TOOL_CALL_MAX_LINES, detail_wrap_width);
+        let input_line = Line::from(input_text.dim());
+        let wrapped_input = adaptive_wrap_line(
+            &input_line,
+            RtOptions::new(detail_wrap_width)
+                .initial_indent("".into())
+                .subsequent_indent("    ".into()),
+        );
+        let input_lines: Vec<Line<'static>> = wrapped_input.iter().map(line_to_static).collect();
+        lines.extend(prefix_lines(input_lines, "  └ ".dim(), "    ".into()));
+
+        if let Some(output) = &self.output
+            && let Some(text) = output.body.to_text()
+            && !text.trim().is_empty()
+        {
+            let output_text =
+                format_and_truncate_tool_result(&text, TOOL_CALL_MAX_LINES, detail_wrap_width);
+            let output_line = Line::from(output_text.dim());
+            let wrapped_output = adaptive_wrap_line(
+                &output_line,
+                RtOptions::new(detail_wrap_width)
+                    .initial_indent("".into())
+                    .subsequent_indent("    ".into()),
+            );
+            let output_lines: Vec<Line<'static>> =
+                wrapped_output.iter().map(line_to_static).collect();
+            lines.extend(prefix_lines(output_lines, "    ".into(), "    ".into()));
+        }
+
+        lines
+    }
+
+    fn transcript_animation_tick(&self) -> Option<u64> {
+        if !self.animations_enabled || self.output.is_some() {
+            return None;
+        }
+        Some((self.start_time.elapsed().as_millis() / 50) as u64)
+    }
+}
+
+pub(crate) fn new_active_function_tool_call(
+    call_id: String,
+    tool_name: String,
+    input: String,
+    animations_enabled: bool,
+) -> FunctionToolCallCell {
+    FunctionToolCallCell::new(call_id, tool_name, input, animations_enabled)
 }
 
 fn web_search_header(completed: bool) -> &'static str {

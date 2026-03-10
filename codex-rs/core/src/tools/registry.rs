@@ -8,6 +8,7 @@ use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::memories::usage::emit_metric_for_tool_read;
 use crate::protocol::SandboxPolicy;
+use crate::protocol::{EventMsg, FunctionToolCallBeginEvent, FunctionToolCallEndEvent};
 use crate::sandbox_tags::sandbox_tag;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -20,6 +21,8 @@ use codex_hooks::HookResult;
 use codex_hooks::HookToolInput;
 use codex_hooks::HookToolInputLocalShell;
 use codex_hooks::HookToolKind;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_utils_readiness::Readiness;
 use tracing::warn;
@@ -151,6 +154,8 @@ impl ToolRegistry {
         let otel = invocation.turn.session_telemetry.clone();
         let payload_for_response = invocation.payload.clone();
         let log_payload = payload_for_response.log_payload();
+        let generic_transcript_enabled =
+            should_emit_generic_function_tool_events(tool_name.as_ref(), &payload_for_response);
         let metric_tags = [
             (
                 "sandbox",
@@ -233,6 +238,20 @@ impl ToolRegistry {
         let invocation_for_tool = invocation.clone();
 
         let started = Instant::now();
+        if generic_transcript_enabled {
+            invocation
+                .session
+                .send_event(
+                    invocation.turn.as_ref(),
+                    EventMsg::FunctionToolCallBegin(FunctionToolCallBeginEvent {
+                        call_id: call_id_owned.clone(),
+                        tool_name: tool_name.clone(),
+                        input: log_payload.to_string(),
+                    }),
+                )
+                .await;
+        }
+
         let result = otel
             .log_tool_result_with_tags(
                 tool_name.as_ref(),
@@ -290,11 +309,63 @@ impl ToolRegistry {
                 let result = guard.take().ok_or_else(|| {
                     FunctionCallError::Fatal("tool produced no output".to_string())
                 })?;
+                if generic_transcript_enabled
+                    && let ResponseInputItem::FunctionCallOutput { output, .. }
+                    | ResponseInputItem::CustomToolCallOutput { output, .. } =
+                        result
+                            .result
+                            .to_response_item(&call_id_owned, &payload_for_response)
+                {
+                    invocation
+                        .session
+                        .send_event(
+                            invocation.turn.as_ref(),
+                            EventMsg::FunctionToolCallEnd(FunctionToolCallEndEvent {
+                                call_id: call_id_owned.clone(),
+                                tool_name: tool_name.clone(),
+                                input: log_payload.to_string(),
+                                duration,
+                                output,
+                            }),
+                        )
+                        .await;
+                }
                 Ok(result)
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                if generic_transcript_enabled {
+                    invocation
+                        .session
+                        .send_event(
+                            invocation.turn.as_ref(),
+                            EventMsg::FunctionToolCallEnd(FunctionToolCallEndEvent {
+                                call_id: call_id_owned.clone(),
+                                tool_name: tool_name.clone(),
+                                input: log_payload.to_string(),
+                                duration,
+                                output: FunctionCallOutputPayload {
+                                    body: FunctionCallOutputBody::Text(err.to_string()),
+                                    success: Some(false),
+                                },
+                            }),
+                        )
+                        .await;
+                }
+                Err(err)
+            }
         }
     }
+}
+
+fn should_emit_generic_function_tool_events(tool_name: &str, payload: &ToolPayload) -> bool {
+    if !matches!(payload, ToolPayload::Function { .. }) {
+        return false;
+    }
+
+    !matches!(
+        tool_name,
+        "shell" | "local_shell" | "exec_command" | "write_stdin" | "apply_patch" | "view_image"
+    )
 }
 
 #[derive(Debug, Clone)]

@@ -5,6 +5,8 @@ use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
 use codex_protocol::protocol::ExecCommandBeginEvent;
 use codex_protocol::protocol::ExecCommandEndEvent;
+use codex_protocol::protocol::FunctionToolCallBeginEvent;
+use codex_protocol::protocol::FunctionToolCallEndEvent;
 use codex_protocol::protocol::McpToolCallBeginEvent;
 use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::protocol::PatchApplyEndEvent;
@@ -22,6 +24,8 @@ pub(crate) enum QueuedInterrupt {
     RequestUserInput(RequestUserInputEvent),
     ExecBegin(ExecCommandBeginEvent),
     ExecEnd(ExecCommandEndEvent),
+    FunctionToolBegin(FunctionToolCallBeginEvent),
+    FunctionToolEnd(FunctionToolCallEndEvent),
     McpBegin(McpToolCallBeginEvent),
     McpEnd(McpToolCallEndEvent),
     PatchEnd(PatchApplyEndEvent),
@@ -74,6 +78,14 @@ impl InterruptManager {
         self.queue.push_back(QueuedInterrupt::ExecEnd(ev));
     }
 
+    pub(crate) fn push_function_tool_begin(&mut self, ev: FunctionToolCallBeginEvent) {
+        self.queue.push_back(QueuedInterrupt::FunctionToolBegin(ev));
+    }
+
+    pub(crate) fn push_function_tool_end(&mut self, ev: FunctionToolCallEndEvent) {
+        self.queue.push_back(QueuedInterrupt::FunctionToolEnd(ev));
+    }
+
     pub(crate) fn push_mcp_begin(&mut self, ev: McpToolCallBeginEvent) {
         self.queue.push_back(QueuedInterrupt::McpBegin(ev));
     }
@@ -96,6 +108,8 @@ impl InterruptManager {
                 QueuedInterrupt::RequestUserInput(ev) => chat.handle_request_user_input_now(ev),
                 QueuedInterrupt::ExecBegin(ev) => chat.handle_exec_begin_now(ev),
                 QueuedInterrupt::ExecEnd(ev) => chat.handle_exec_end_now(ev),
+                QueuedInterrupt::FunctionToolBegin(ev) => chat.handle_function_tool_begin_now(ev),
+                QueuedInterrupt::FunctionToolEnd(ev) => chat.handle_function_tool_end_now(ev),
                 QueuedInterrupt::McpBegin(ev) => chat.handle_mcp_begin_now(ev),
                 QueuedInterrupt::McpEnd(ev) => chat.handle_mcp_end_now(ev),
                 QueuedInterrupt::PatchEnd(ev) => chat.handle_patch_apply_end_now(ev),

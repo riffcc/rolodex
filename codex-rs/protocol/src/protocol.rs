@@ -34,6 +34,7 @@ use crate::mcp::Tool as McpTool;
 use crate::message_history::HistoryEntry;
 use crate::models::BaseInstructions;
 use crate::models::ContentItem;
+use crate::models::FunctionCallOutputPayload;
 use crate::models::MessagePhase;
 use crate::models::PermissionProfile;
 use crate::models::ResponseItem;
@@ -1153,6 +1154,10 @@ pub enum EventMsg {
 
     McpToolCallEnd(McpToolCallEndEvent),
 
+    FunctionToolCallBegin(FunctionToolCallBeginEvent),
+
+    FunctionToolCallEnd(FunctionToolCallEndEvent),
+
     WebSearchBegin(WebSearchBeginEvent),
 
     WebSearchEnd(WebSearchEndEvent),
@@ -2007,6 +2012,29 @@ pub struct McpToolCallEndEvent {
     pub duration: Duration,
     /// Result of the tool call. Note this could be an error.
     pub result: Result<CallToolResult, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
+pub struct FunctionToolCallBeginEvent {
+    /// Identifier so this can be paired with the FunctionToolCallEnd event.
+    pub call_id: String,
+    /// The normal function tool name, such as `read_file` or `edit`.
+    pub tool_name: String,
+    /// Human-readable input payload shown in transcript/history surfaces.
+    pub input: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
+pub struct FunctionToolCallEndEvent {
+    /// Identifier for the corresponding FunctionToolCallBegin that finished.
+    pub call_id: String,
+    pub tool_name: String,
+    /// Human-readable input payload shown in transcript/history surfaces.
+    pub input: String,
+    #[ts(type = "string")]
+    pub duration: Duration,
+    /// Result of the tool call. Note this may still represent a failure.
+    pub output: FunctionCallOutputPayload,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]

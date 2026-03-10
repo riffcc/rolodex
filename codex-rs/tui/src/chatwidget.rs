@@ -114,6 +114,8 @@ use codex_protocol::protocol::ExecCommandEndEvent;
 use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::ExitedReviewModeEvent;
+use codex_protocol::protocol::FunctionToolCallBeginEvent;
+use codex_protocol::protocol::FunctionToolCallEndEvent;
 use codex_protocol::protocol::ImageGenerationBeginEvent;
 use codex_protocol::protocol::ImageGenerationEndEvent;
 use codex_protocol::protocol::ListCustomPromptsResponseEvent;
@@ -247,6 +249,7 @@ use crate::exec_command::strip_bash_lc_and_escape;
 use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
+use crate::history_cell::FunctionToolCallCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PlainHistoryCell;
@@ -2520,6 +2523,22 @@ impl ChatWidget {
         self.defer_or_handle(|q| q.push_mcp_end(ev), |s| s.handle_mcp_end_now(ev2));
     }
 
+    fn on_function_tool_call_begin(&mut self, ev: FunctionToolCallBeginEvent) {
+        let ev2 = ev.clone();
+        self.defer_or_handle(
+            |q| q.push_function_tool_begin(ev),
+            |s| s.handle_function_tool_begin_now(ev2),
+        );
+    }
+
+    fn on_function_tool_call_end(&mut self, ev: FunctionToolCallEndEvent) {
+        let ev2 = ev.clone();
+        self.defer_or_handle(
+            |q| q.push_function_tool_end(ev),
+            |s| s.handle_function_tool_end_now(ev2),
+        );
+    }
+
     fn on_web_search_begin(&mut self, ev: WebSearchBeginEvent) {
         self.flush_answer_stream_with_separator();
         self.flush_active_cell();
@@ -3176,6 +3195,56 @@ impl ChatWidget {
             self.add_boxed_history(extra);
         }
         // Mark that actual work was done (MCP tool call)
+        self.had_work_activity = true;
+    }
+
+    pub(crate) fn handle_function_tool_begin_now(&mut self, ev: FunctionToolCallBeginEvent) {
+        self.flush_answer_stream_with_separator();
+        self.flush_active_cell();
+        self.active_cell = Some(Box::new(history_cell::new_active_function_tool_call(
+            ev.call_id,
+            ev.tool_name,
+            ev.input,
+            self.config.animations,
+        )));
+        self.bump_active_cell_revision();
+        self.request_redraw();
+    }
+
+    pub(crate) fn handle_function_tool_end_now(&mut self, ev: FunctionToolCallEndEvent) {
+        self.flush_answer_stream_with_separator();
+
+        let FunctionToolCallEndEvent {
+            call_id,
+            tool_name,
+            input,
+            duration,
+            output,
+        } = ev;
+
+        match self
+            .active_cell
+            .as_mut()
+            .and_then(|cell| cell.as_any_mut().downcast_mut::<FunctionToolCallCell>())
+        {
+            Some(cell) if cell.call_id() == call_id => {
+                cell.complete(duration, output);
+            }
+            _ => {
+                self.flush_active_cell();
+                let mut cell = history_cell::new_active_function_tool_call(
+                    call_id,
+                    tool_name,
+                    input,
+                    self.config.animations,
+                );
+                cell.complete(duration, output);
+                self.active_cell = Some(Box::new(cell));
+            }
+        };
+
+        self.bump_active_cell_revision();
+        self.flush_active_cell();
         self.had_work_activity = true;
     }
 
@@ -4957,6 +5026,8 @@ impl ChatWidget {
             }
             EventMsg::McpStartupUpdate(ev) => self.on_mcp_startup_update(ev),
             EventMsg::McpStartupComplete(ev) => self.on_mcp_startup_complete(ev),
+            EventMsg::FunctionToolCallBegin(ev) => self.on_function_tool_call_begin(ev),
+            EventMsg::FunctionToolCallEnd(ev) => self.on_function_tool_call_end(ev),
             EventMsg::TurnAborted(ev) => match ev.reason {
                 TurnAbortReason::Interrupted => {
                     self.on_interrupted_turn(ev.reason);
@@ -5287,6 +5358,8 @@ impl ChatWidget {
             if let Some(exec) = cell.as_any_mut().downcast_mut::<ExecCell>() {
                 exec.mark_failed();
             } else if let Some(tool) = cell.as_any_mut().downcast_mut::<McpToolCallCell>() {
+                tool.mark_failed();
+            } else if let Some(tool) = cell.as_any_mut().downcast_mut::<FunctionToolCallCell>() {
                 tool.mark_failed();
             }
             self.add_boxed_history(cell);
