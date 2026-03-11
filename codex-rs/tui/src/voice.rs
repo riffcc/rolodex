@@ -14,24 +14,37 @@ use cpal::traits::DeviceTrait;
 use cpal::traits::HostTrait;
 use cpal::traits::StreamTrait;
 #[cfg(target_os = "linux")]
+use flate2::read::GzDecoder;
+#[cfg(target_os = "linux")]
 use handy_core::transcribe_default;
 use hound::SampleFormat;
 use hound::WavSpec;
 use hound::WavWriter;
+#[cfg(target_os = "linux")]
+use std::fs;
 use std::collections::VecDeque;
 use std::io::Cursor;
+#[cfg(target_os = "linux")]
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use tar::Archive;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use tracing::error;
-use tracing::info;
 use tracing::trace;
 
 const AUDIO_MODEL: &str = "gpt-4o-mini-transcribe";
 const MODEL_AUDIO_SAMPLE_RATE: u32 = 24_000;
 const MODEL_AUDIO_CHANNELS: u16 = 1;
+#[cfg(target_os = "linux")]
+const LOCAL_VOICE_MODEL_ID: &str = "parakeet-tdt-0.6b-v3";
+#[cfg(target_os = "linux")]
+const LOCAL_VOICE_MODEL_DIRNAME: &str = "parakeet-tdt-0.6b-v3-int8";
+#[cfg(target_os = "linux")]
+const LOCAL_VOICE_MODEL_URL: &str = "https://blob.handy.computer/parakeet-v3-int8.tar.gz";
 
 struct TranscriptionAuthContext {
     mode: AuthMode,
@@ -218,6 +231,11 @@ pub fn transcribe_async(
     {
         let _ = context;
         std::thread::spawn(move || {
+            if let Err(err) = ensure_local_voice_assets() {
+                tx.send(AppEvent::TranscriptionFailed { id, error: err });
+                return;
+            }
+
             const MIN_DURATION_SECONDS: f32 = 0.25;
             let duration_seconds = clip_duration_seconds(&audio);
             if duration_seconds < MIN_DURATION_SECONDS {
@@ -296,6 +314,167 @@ pub fn transcribe_async(
             }
         }
     });
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_local_voice_assets() -> Result<(), String> {
+    let handy_root = handy_root()?;
+    let model_dir = handy_root
+        .join("models")
+        .join(local_voice_model_dirname());
+    let ready_marker = model_dir.join("encoder-model.int8.onnx");
+    let settings_path = handy_root.join("settings_store.json");
+
+    if ready_marker.is_file() && settings_path.is_file() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(handy_root.join("models"))
+        .map_err(|e| format!("failed to create local voice model directory: {e}"))?;
+
+    if !ready_marker.is_file() {
+        download_and_extract_local_voice_model(&handy_root, &model_dir, &ready_marker)?;
+    }
+
+    if !settings_path.is_file() {
+        write_local_voice_settings(&settings_path)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn download_and_extract_local_voice_model(
+    _handy_root: &Path,
+    model_dir: &Path,
+    ready_marker: &Path,
+) -> Result<(), String> {
+    let cache_dir = local_voice_cache_dir()?;
+    fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("failed to create local voice cache directory: {e}"))?;
+    let archive_path = cache_dir.join(format!("{}.tar.gz", local_voice_model_dirname()));
+
+    if !archive_path.is_file() {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| format!("failed to create runtime for local voice bootstrap: {e}"))?;
+        let bytes = rt.block_on(async {
+            let response = reqwest::get(local_voice_model_url())
+                .await
+                .map_err(|e| format!("failed to download local voice model: {e}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!(
+                    "failed to download local voice model: HTTP {status}"
+                ));
+            }
+            response
+                .bytes()
+                .await
+                .map_err(|e| format!("failed to read local voice model archive: {e}"))
+        })?;
+        fs::write(&archive_path, &bytes)
+            .map_err(|e| format!("failed to write local voice archive: {e}"))?;
+    }
+
+    let tmp_dir = cache_dir.join(format!(
+        "extract-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    if tmp_dir.exists() {
+        fs::remove_dir_all(&tmp_dir)
+            .map_err(|e| format!("failed to clear stale local voice temp dir: {e}"))?;
+    }
+    fs::create_dir_all(&tmp_dir)
+        .map_err(|e| format!("failed to create local voice temp dir: {e}"))?;
+
+    let extract_result = (|| -> Result<(), String> {
+        let file = fs::File::open(&archive_path)
+            .map_err(|e| format!("failed to open local voice archive: {e}"))?;
+        let decoder = GzDecoder::new(file);
+        let mut archive = Archive::new(decoder);
+        archive
+            .unpack(&tmp_dir)
+            .map_err(|e| format!("failed to unpack local voice archive: {e}"))?;
+        Ok(())
+    })();
+
+    if extract_result.is_err() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return extract_result;
+    }
+
+    let extracted_model_dir = tmp_dir.join(local_voice_model_dirname());
+    if !extracted_model_dir.is_dir() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(format!(
+            "local voice archive missing expected directory {}",
+            local_voice_model_dirname()
+        ));
+    }
+
+    if model_dir.exists() {
+        fs::remove_dir_all(model_dir)
+            .map_err(|e| format!("failed to replace local voice model directory: {e}"))?;
+    }
+    fs::rename(&extracted_model_dir, model_dir)
+        .map_err(|e| format!("failed to install local voice model: {e}"))?;
+    let _ = fs::remove_dir_all(&tmp_dir);
+
+    if !ready_marker.is_file() {
+        return Err("local voice model installed but encoder file is missing".to_string());
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_local_voice_settings(settings_path: &Path) -> Result<(), String> {
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create local voice settings directory: {e}"))?;
+    }
+    let body = format!(
+        "{{\"settings\":{{\"selected_language\":\"auto\",\"selected_model\":\"{}\",\"translate_to_english\":false}}}}",
+        local_voice_model_id()
+    );
+    fs::write(settings_path, body)
+        .map_err(|e| format!("failed to write local voice settings: {e}"))
+}
+
+#[cfg(target_os = "linux")]
+fn handy_root() -> Result<std::path::PathBuf, String> {
+    if let Ok(root) = std::env::var("RIFF_CODEX_LOCAL_VOICE_ROOT") {
+        return Ok(std::path::PathBuf::from(root));
+    }
+    let data_dir = dirs::data_local_dir()
+        .ok_or_else(|| "failed to resolve local data directory for voice bootstrap".to_string())?;
+    Ok(data_dir.join("com.pais.handy"))
+}
+
+#[cfg(target_os = "linux")]
+fn local_voice_cache_dir() -> Result<std::path::PathBuf, String> {
+    if let Ok(root) = std::env::var("RIFF_CODEX_LOCAL_VOICE_CACHE_DIR") {
+        return Ok(std::path::PathBuf::from(root));
+    }
+    let cache_dir = dirs::cache_dir()
+        .ok_or_else(|| "failed to resolve cache directory for voice bootstrap".to_string())?;
+    Ok(cache_dir.join("riff-codex"))
+}
+
+#[cfg(target_os = "linux")]
+fn local_voice_model_id() -> &'static str {
+    LOCAL_VOICE_MODEL_ID
+}
+
+#[cfg(target_os = "linux")]
+fn local_voice_model_dirname() -> &'static str {
+    LOCAL_VOICE_MODEL_DIRNAME
+}
+
+#[cfg(target_os = "linux")]
+fn local_voice_model_url() -> &'static str {
+    LOCAL_VOICE_MODEL_URL
 }
 
 // -------------------------

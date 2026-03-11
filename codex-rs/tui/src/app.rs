@@ -3374,8 +3374,17 @@ impl App {
                     }
                 }
             }
-            AppEvent::TranscriptionFailed { id, error: _ } => {
+            AppEvent::TranscriptionFailed { id, error } => {
                 self.chat_widget.remove_transcription_placeholder(&id);
+                let message = if error.trim().is_empty() {
+                    "Voice transcription failed.".to_string()
+                } else {
+                    format!("Voice transcription failed: {error}")
+                };
+                tracing::error!("{message}");
+                self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                    history_cell::new_warning_event(message),
+                )));
                 #[cfg(all(target_os = "linux", feature = "voice-input"))]
                 if self.handy_gamepad.placeholder_id.as_deref() == Some(id.as_str()) {
                     self.handy_gamepad.placeholder_id = None;

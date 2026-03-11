@@ -107,6 +107,8 @@ webbrowser = { workspace = true }
 uuid = { workspace = true }
 cpal = { version = "0.15", optional = true }
 hound = { version = "3.5", optional = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
 
 codex-windows-sandbox = { workspace = true }
 tokio-util = { workspace = true, features = ["time"] }
