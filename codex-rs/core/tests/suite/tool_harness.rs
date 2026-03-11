@@ -566,7 +566,10 @@ async fn edit_tool_applies_batched_operations() -> anyhow::Result<()> {
     assert_eq!(success_flag, Some(true));
 
     assert_eq!(fs::read_to_string(&alpha)?, "hello\nthere\nteam\n");
-    assert_eq!(fs::read_to_string(cwd.path().join("beta.txt"))?, "fresh\nfile\n");
+    assert_eq!(
+        fs::read_to_string(cwd.path().join("beta.txt"))?,
+        "fresh\nfile\n"
+    );
 
     Ok(())
 }

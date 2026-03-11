@@ -48,8 +48,8 @@ use crate::status::RateLimitWindowDisplay;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
-use crate::text_formatting::proper_join;
 use crate::task_picker;
+use crate::text_formatting::proper_join;
 use crate::version::CODEX_CLI_VERSION;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_backend_client::Client as BackendClient;
@@ -8646,10 +8646,11 @@ impl ChatWidget {
         let request_id = self.task_picker_request_id;
         self.task_picker_action_cache.clear();
 
-        self.bottom_pane.show_view(Box::new(task_picker::TaskPickerView::loading(
-            self.app_event_tx.clone(),
-            "Loading Palace Plane tasks...".to_string(),
-        )));
+        self.bottom_pane
+            .show_view(Box::new(task_picker::TaskPickerView::loading(
+                self.app_event_tx.clone(),
+                "Loading Palace Plane tasks...".to_string(),
+            )));
 
         let app_event_tx = self.app_event_tx.clone();
         let cwd = self.config.cwd.clone();
@@ -8657,7 +8658,10 @@ impl ChatWidget {
             let payload =
                 task_picker::load_task_picker_payload(cwd, task_picker::TaskPickerLoadTarget::Auto)
                     .await;
-            app_event_tx.send(AppEvent::TaskPickerPayloadLoaded { request_id, payload });
+            app_event_tx.send(AppEvent::TaskPickerPayloadLoaded {
+                request_id,
+                payload,
+            });
         });
     }
 
@@ -8691,7 +8695,10 @@ impl ChatWidget {
                 },
             )
             .await;
-            app_event_tx.send(AppEvent::TaskPickerPayloadLoaded { request_id, payload });
+            app_event_tx.send(AppEvent::TaskPickerPayloadLoaded {
+                request_id,
+                payload,
+            });
         });
     }
 
@@ -8941,12 +8948,7 @@ impl ChatWidget {
 
         self.bottom_pane.ensure_status_indicator();
         self.bottom_pane.set_interrupt_hint_visible(false);
-        self.set_status(
-            header,
-            details,
-            StatusDetailsCapitalization::Preserve,
-            2,
-        );
+        self.set_status(header, details, StatusDetailsCapitalization::Preserve, 2);
     }
 
     pub(crate) fn hide_voice_overlay(&mut self) {
@@ -8976,10 +8978,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(crate) fn set_voice_visual_state(
-        &mut self,
-        state: crate::bottom_pane::VoiceVisualState,
-    ) {
+    pub(crate) fn set_voice_visual_state(&mut self, state: crate::bottom_pane::VoiceVisualState) {
         self.bottom_pane.set_voice_visual_state(state);
         self.request_redraw();
     }

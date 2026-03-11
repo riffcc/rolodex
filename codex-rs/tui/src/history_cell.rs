@@ -1576,7 +1576,9 @@ impl FunctionToolCallCell {
     pub(crate) fn mark_failed(&mut self) {
         if self.output.is_none() {
             self.duration = Some(self.start_time.elapsed());
-            self.output = Some(FunctionCallOutputPayload::from_text("interrupted".to_string()));
+            self.output = Some(FunctionCallOutputPayload::from_text(
+                "interrupted".to_string(),
+            ));
             if let Some(output) = self.output.as_mut() {
                 output.success = Some(false);
             }
@@ -1597,7 +1599,11 @@ impl HistoryCell for FunctionToolCallCell {
             Some(false) => "•".red().bold(),
             None => spinner(Some(self.start_time), self.animations_enabled),
         };
-        let header_text = if status.is_some() { "Called" } else { "Calling" };
+        let header_text = if status.is_some() {
+            "Called"
+        } else {
+            "Calling"
+        };
 
         let compact_header = Line::from(vec![
             bullet,

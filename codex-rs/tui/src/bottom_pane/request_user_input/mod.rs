@@ -240,7 +240,8 @@ impl RequestUserInputOverlay {
     }
 
     fn current_question_allows_multiple(&self) -> bool {
-        self.current_question().is_some_and(|question| question.allow_multiple)
+        self.current_question()
+            .is_some_and(|question| question.allow_multiple)
     }
 
     fn focused_option_is_other(&self) -> bool {
@@ -3048,7 +3049,10 @@ mod tests {
     fn multi_select_submission_includes_multiple_option_labels() {
         let (tx, mut rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
-            request_event("turn-1", vec![question_with_multi_select("q1", "Pick many")]),
+            request_event(
+                "turn-1",
+                vec![question_with_multi_select("q1", "Pick many")],
+            ),
             tx,
             true,
             false,
@@ -3076,7 +3080,10 @@ mod tests {
     fn multi_select_counts_as_answered_once_any_option_is_selected() {
         let (tx, _rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
-            request_event("turn-1", vec![question_with_multi_select("q1", "Pick many")]),
+            request_event(
+                "turn-1",
+                vec![question_with_multi_select("q1", "Pick many")],
+            ),
             tx,
             true,
             false,

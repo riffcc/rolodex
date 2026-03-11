@@ -1,7 +1,5 @@
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
-#[cfg(target_os = "linux")]
-use handy_core::transcribe_default;
 use base64::Engine;
 use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::config::Config;
@@ -15,6 +13,8 @@ use codex_protocol::protocol::RealtimeAudioFrame;
 use cpal::traits::DeviceTrait;
 use cpal::traits::HostTrait;
 use cpal::traits::StreamTrait;
+#[cfg(target_os = "linux")]
+use handy_core::transcribe_default;
 use hound::SampleFormat;
 use hound::WavSpec;
 use hound::WavWriter;

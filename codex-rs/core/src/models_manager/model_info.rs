@@ -55,7 +55,8 @@ pub(crate) fn with_config_overrides(mut model: ModelInfo, config: &Config) -> Mo
     }
 
     if model.experimental_supported_tools.is_empty() {
-        model.experimental_supported_tools = default_experimental_supported_tools_for_slug(&model.slug);
+        model.experimental_supported_tools =
+            default_experimental_supported_tools_for_slug(&model.slug);
     }
 
     model

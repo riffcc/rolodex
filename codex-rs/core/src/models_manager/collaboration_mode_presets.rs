@@ -148,12 +148,15 @@ mod tests {
         let default_instructions = default_preset(CollaborationModesConfig {
             default_mode_request_user_input: true,
         })
-            .developer_instructions
-            .expect("default preset should include instructions")
-            .expect("default instructions should be set");
+        .developer_instructions
+        .expect("default preset should include instructions")
+        .expect("default instructions should be set");
 
         assert!(default_instructions.contains("prefer using the `request_user_input` tool"));
-        assert!(default_instructions.contains("The `request_user_input` tool is available in Default mode."));
+        assert!(
+            default_instructions
+                .contains("The `request_user_input` tool is available in Default mode.")
+        );
     }
 
     #[test]

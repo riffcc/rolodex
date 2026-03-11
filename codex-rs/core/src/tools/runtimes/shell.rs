@@ -189,7 +189,11 @@ impl Approvable<ShellRequest> for ShellRuntime {
         })
     }
 
-    fn apply_approval_decision(&self, req: &ShellRequest, decision: &ReviewDecision) -> ShellRequest {
+    fn apply_approval_decision(
+        &self,
+        req: &ShellRequest,
+        decision: &ReviewDecision,
+    ) -> ShellRequest {
         let mut req = req.clone();
         if let ReviewDecision::ApprovedAdditionalPermissions { permission_profile } = decision {
             req.additional_permissions = Some(permission_profile.clone());

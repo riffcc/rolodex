@@ -154,6 +154,829 @@ impl ToolHandler for ReadFileHandler {
     }
 }
 
+fn validate_read_bounds(offset: usize, limit: usize) -> Result<(), FunctionCallError> {
+    if offset == 0 {
+        return Err(FunctionCallError::RespondToModel(
+            "offset must be a 1-indexed line number".to_string(),
+        ));
+    }
+    if limit == 0 {
+        return Err(FunctionCallError::RespondToModel(
+            "limit must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn execute_pipeline(
+    turn: &crate::codex::TurnContext,
+    pipeline: Vec<PipelineStep>,
+) -> Result<PipelineValue, FunctionCallError> {
+    let mut current: Option<PipelineValue> = None;
+    for step in pipeline {
+        current = Some(match step {
+            PipelineStep::Grep(grep) => execute_grep_step(turn, &grep).await?,
+            PipelineStep::Read(read) => execute_pipeline_read_step(turn, current, &read).await?,
+        });
+    }
+
+    current.ok_or_else(|| {
+        FunctionCallError::RespondToModel("pipeline must contain at least one step".to_string())
+    })
+}
+
+async fn execute_explicit_reads(
+    turn: &crate::codex::TurnContext,
+    reads: Vec<ReadRequest>,
+) -> Result<Vec<ReadArtifact>, FunctionCallError> {
+    let mut artifacts = Vec::with_capacity(reads.len());
+    for read in reads {
+        validate_read_bounds(read.offset, read.limit)?;
+        let path = turn.resolve_path(Some(read.file_path.clone()));
+        artifacts.push(execute_single_read(&path, read).await?);
+    }
+    Ok(artifacts)
+}
+
+async fn execute_pipeline_read_step(
+    turn: &crate::codex::TurnContext,
+    current: Option<PipelineValue>,
+    step: &PipelineReadStep,
+) -> Result<PipelineValue, FunctionCallError> {
+    if let Some(reads) = step.reads.clone() {
+        return Ok(PipelineValue::Reads(
+            execute_explicit_reads(turn, reads).await?,
+        ));
+    }
+
+    match (step.from, current) {
+        (Some(PipelineInput::PreviousFiles), Some(PipelineValue::Files(paths))) => {
+            let mut artifacts = Vec::with_capacity(paths.len());
+            for path in paths {
+                let request = ReadRequest {
+                    file_path: path.display().to_string(),
+                    offset: defaults::offset(),
+                    limit: step.limit,
+                    mode: step.mode.unwrap_or_default(),
+                    indentation: step.indentation.clone(),
+                };
+                artifacts.push(execute_single_read(&path, request).await?);
+            }
+            Ok(PipelineValue::Reads(artifacts))
+        }
+        (Some(PipelineInput::PreviousMatches), Some(PipelineValue::Matches(matches))) => {
+            let mut artifacts = Vec::with_capacity(matches.len());
+            for found in matches {
+                let mode = step.mode.unwrap_or(ReadMode::Indentation);
+                let request = request_from_match(&found, step, mode);
+                let mut artifact = execute_single_read(&found.path, request).await?;
+                artifact.label = Some(format!("match L{}", found.line));
+                artifacts.push(artifact);
+            }
+            Ok(PipelineValue::Reads(artifacts))
+        }
+        (Some(PipelineInput::PreviousFiles), Some(PipelineValue::Reads(_)))
+        | (Some(PipelineInput::PreviousMatches), Some(PipelineValue::Reads(_)))
+        | (Some(PipelineInput::PreviousFiles), Some(PipelineValue::Matches(_)))
+        | (Some(PipelineInput::PreviousMatches), Some(PipelineValue::Files(_)))
+        | (None, _) => Err(FunctionCallError::RespondToModel(
+            "read pipeline step needs either explicit reads or a compatible `from` source"
+                .to_string(),
+        )),
+        (_, None) => Err(FunctionCallError::RespondToModel(
+            "read pipeline step cannot run before any pipeline output exists".to_string(),
+        )),
+    }
+}
+
+fn request_from_match(found: &GrepMatch, step: &PipelineReadStep, mode: ReadMode) -> ReadRequest {
+    match mode {
+        ReadMode::Slice => {
+            let before = step.match_window_before.unwrap_or(6);
+            let after = step.match_window_after.unwrap_or(12);
+            let offset = found.line.saturating_sub(before).max(1);
+            let limit = before + after + 1;
+            ReadRequest {
+                file_path: found.path.display().to_string(),
+                offset,
+                limit,
+                mode,
+                indentation: None,
+            }
+        }
+        ReadMode::Indentation => {
+            let mut indentation = step.indentation.clone().unwrap_or_default();
+            indentation.anchor_line = Some(found.line);
+            ReadRequest {
+                file_path: found.path.display().to_string(),
+                offset: found.line,
+                limit: step.limit,
+                mode,
+                indentation: Some(indentation),
+            }
+        }
+    }
+}
+
+async fn execute_single_read(
+    path: &Path,
+    request: ReadRequest,
+) -> Result<ReadArtifact, FunctionCallError> {
+    validate_read_bounds(request.offset, request.limit)?;
+    let lines = match request.mode {
+        ReadMode::Slice => slice::read(path, request.offset, request.limit).await?,
+        ReadMode::Indentation => {
+            let indentation = request.indentation.unwrap_or_default();
+            indentation::read_block(path, request.offset, request.limit, indentation).await?
+        }
+    };
+    Ok(ReadArtifact {
+        path: path.to_path_buf(),
+        label: None,
+        lines,
+    })
+}
+
+async fn execute_grep_step(
+    turn: &crate::codex::TurnContext,
+    grep: &GrepRequest,
+) -> Result<PipelineValue, FunctionCallError> {
+    let pattern = grep.pattern.trim();
+    if pattern.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "grep pattern must not be empty".to_string(),
+        ));
+    }
+
+    let limit = grep.limit.min(MAX_GREP_LIMIT);
+    if limit == 0 {
+        return Err(FunctionCallError::RespondToModel(
+            "grep limit must be greater than zero".to_string(),
+        ));
+    }
+
+    let search_path = turn.resolve_path(grep.path.clone());
+    verify_path_exists(&search_path).await?;
+
+    let include = grep.include.as_deref().map(str::trim).and_then(|val| {
+        if val.is_empty() {
+            None
+        } else {
+            Some(val.to_string())
+        }
+    });
+
+    match grep.output {
+        GrepOutput::Files => {
+            let files =
+                run_rg_file_search(pattern, include.as_deref(), &search_path, limit, &turn.cwd)
+                    .await?;
+            Ok(PipelineValue::Files(files))
+        }
+        GrepOutput::Matches => {
+            let matches =
+                run_rg_match_search(pattern, include.as_deref(), &search_path, limit, &turn.cwd)
+                    .await?;
+            Ok(PipelineValue::Matches(matches))
+        }
+    }
+}
+
+async fn verify_path_exists(path: &Path) -> Result<(), FunctionCallError> {
+    tokio::fs::metadata(path).await.map_err(|err| {
+        FunctionCallError::RespondToModel(format!("unable to access `{}`: {err}", path.display()))
+    })?;
+    Ok(())
+}
+
+async fn execute_map_request(
+    turn: &crate::codex::TurnContext,
+    map: &MapRequest,
+) -> Result<String, FunctionCallError> {
+    let search_path = turn.resolve_path(map.path.clone());
+    verify_path_exists(&search_path).await?;
+    let root = map_root(&search_path);
+
+    match map.preset {
+        MapPreset::ProtocolMap => {
+            let hot_files = build_protocol_hot_files(root, map.limit, &turn.cwd).await?;
+            let message_families = discover_message_families(root, map.limit, &turn.cwd).await?;
+            let version_clues = discover_version_clues(root, map.limit, &turn.cwd).await?;
+
+            let artifact = ProtocolMapArtifact {
+                preset: "protocol_map",
+                root: root.display().to_string(),
+                generated_at: chrono::Utc::now().to_rfc3339(),
+                hot_files: hot_files.clone(),
+                message_families,
+                version_clues: version_clues.clone(),
+                evidence: hot_files
+                    .iter()
+                    .take(8)
+                    .flat_map(|record| {
+                        record
+                            .reasons
+                            .iter()
+                            .map(move |reason| format!("{} :: {}", record.path, reason))
+                    })
+                    .collect(),
+            };
+
+            let mut artifact_paths = Vec::new();
+            if map.write_artifacts {
+                artifact_paths = write_protocol_map_artifacts(root, &artifact).await?;
+            }
+
+            Ok(render_protocol_map_summary(&artifact, &artifact_paths))
+        }
+    }
+}
+
+fn map_root(path: &Path) -> &Path {
+    if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    }
+}
+
+async fn write_protocol_map_artifacts(
+    root: &Path,
+    artifact: &ProtocolMapArtifact,
+) -> Result<Vec<PathBuf>, FunctionCallError> {
+    let maps_dir = root.join(".palace").join("maps");
+    tokio::fs::create_dir_all(&maps_dir).await.map_err(|err| {
+        FunctionCallError::RespondToModel(format!(
+            "failed to create `{}`: {err}",
+            maps_dir.display()
+        ))
+    })?;
+
+    let protocol_path = maps_dir.join("protocol-graph.json");
+    let hot_files_path = maps_dir.join("hot-files.json");
+    let version_path = maps_dir.join("version-map.json");
+    let repo_spine_path = maps_dir.join("repo-spine.json");
+
+    let protocol_json = serde_json::to_string_pretty(artifact).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to serialize protocol map: {err}"))
+    })?;
+    let hot_files_json = serde_json::to_string_pretty(&artifact.hot_files).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to serialize hot files map: {err}"))
+    })?;
+    let version_json = serde_json::to_string_pretty(&artifact.version_clues).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to serialize version map: {err}"))
+    })?;
+    let repo_spine_json =
+        serde_json::to_string_pretty(&artifact.hot_files.iter().take(10).collect::<Vec<_>>())
+            .map_err(|err| {
+                FunctionCallError::RespondToModel(format!("failed to serialize repo spine: {err}"))
+            })?;
+
+    for (path, content) in [
+        (&protocol_path, protocol_json),
+        (&hot_files_path, hot_files_json),
+        (&version_path, version_json),
+        (&repo_spine_path, repo_spine_json),
+    ] {
+        tokio::fs::write(path, content).await.map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to write `{}`: {err}",
+                path.display()
+            ))
+        })?;
+    }
+
+    Ok(vec![
+        protocol_path,
+        hot_files_path,
+        version_path,
+        repo_spine_path,
+    ])
+}
+
+fn render_protocol_map_summary(
+    artifact: &ProtocolMapArtifact,
+    artifact_paths: &[PathBuf],
+) -> String {
+    let mut sections = vec![
+        format!("protocol_map root: {}", artifact.root),
+        format!("generated_at: {}", artifact.generated_at),
+    ];
+
+    if !artifact_paths.is_empty() {
+        sections.push("artifacts:".to_string());
+        for path in artifact_paths {
+            sections.push(format!("- {}", path.display()));
+        }
+    }
+
+    sections.push("hot_files:".to_string());
+    if artifact.hot_files.is_empty() {
+        sections.push("- none".to_string());
+    } else {
+        for file in artifact.hot_files.iter().take(12) {
+            sections.push(format!(
+                "- {} [score={}] {}",
+                file.path,
+                file.score,
+                file.reasons.join("; ")
+            ));
+        }
+    }
+
+    sections.push("message_families:".to_string());
+    if artifact.message_families.is_empty() {
+        sections.push("- none".to_string());
+    } else {
+        for family in artifact.message_families.iter().take(12) {
+            sections.push(format!(
+                "- {} ({}) {}",
+                family.name,
+                family.count,
+                family.examples.join(", ")
+            ));
+        }
+    }
+
+    sections.push("version_clues:".to_string());
+    if artifact.version_clues.is_empty() {
+        sections.push("- none".to_string());
+    } else {
+        for clue in artifact.version_clues.iter().take(12) {
+            sections.push(format!("- {}:L{}: {}", clue.path, clue.line, clue.text));
+        }
+    }
+
+    sections.join("\n")
+}
+
+async fn build_protocol_hot_files(
+    root: &Path,
+    limit: usize,
+    cwd: &Path,
+) -> Result<Vec<HotFileRecord>, FunctionCallError> {
+    let mut scored: BTreeMap<String, HotFileAccumulator> = BTreeMap::new();
+
+    for path in run_rg_files_listing(root, cwd).await? {
+        let normalized = path.display().to_string();
+        let lower = normalized.to_lowercase();
+        for (needle, weight, reason) in [
+            ("protocol", 8, "filename suggests protocol spine"),
+            ("communication", 8, "filename suggests communication schema"),
+            ("message", 7, "filename suggests message definitions"),
+            ("packet", 7, "filename suggests packet definitions"),
+            ("rpc", 6, "filename suggests RPC surface"),
+            ("api", 5, "filename suggests API boundary"),
+            ("schema", 5, "filename suggests schema boundary"),
+            ("opcode", 6, "filename suggests opcode table"),
+            ("wire", 5, "filename suggests wire format"),
+        ] {
+            if lower.contains(needle) {
+                record_hot_file_reason(&mut scored, &normalized, weight, reason);
+            }
+        }
+    }
+
+    for (pattern, weight, reason) in [
+        (
+            "[A-Z]{2,}TO[A-Z]{2,}_[A-Z0-9_]+",
+            10,
+            "contains protocol/message family identifiers",
+        ),
+        (
+            "(protocol|packet|message|request|response|opcode)",
+            4,
+            "contains protocol terminology",
+        ),
+        (
+            "(protocolVersion|version|fver|sequence_id)",
+            3,
+            "contains versioning clues",
+        ),
+    ] {
+        for found in run_rg_match_search(pattern, None, root, limit * 8, cwd).await? {
+            record_hot_file_reason(
+                &mut scored,
+                &found.path.display().to_string(),
+                weight,
+                &format!("{reason}: {}", found.text.trim()),
+            );
+        }
+    }
+
+    let mut hot_files = scored
+        .into_iter()
+        .map(|(path, acc)| HotFileRecord {
+            path,
+            score: acc.score,
+            reasons: acc.reasons,
+        })
+        .collect::<Vec<_>>();
+    hot_files.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    hot_files.truncate(limit.max(1));
+    Ok(hot_files)
+}
+
+fn record_hot_file_reason(
+    scored: &mut BTreeMap<String, HotFileAccumulator>,
+    path: &str,
+    weight: usize,
+    reason: &str,
+) {
+    let entry = scored.entry(path.to_string()).or_default();
+    entry.score += weight;
+    if !entry.reasons.iter().any(|existing| existing == reason) {
+        entry.reasons.push(reason.to_string());
+    }
+}
+
+async fn discover_message_families(
+    root: &Path,
+    limit: usize,
+    cwd: &Path,
+) -> Result<Vec<MessageFamilyRecord>, FunctionCallError> {
+    let mut families: BTreeMap<String, (usize, Vec<String>)> = BTreeMap::new();
+    for found in run_rg_match_search(
+        "[A-Z]{2,}TO[A-Z]{2,}_[A-Z0-9_]+",
+        None,
+        root,
+        limit * 16,
+        cwd,
+    )
+    .await?
+    {
+        for token in extract_protocol_tokens(&found.text) {
+            let family = token.split('_').next().unwrap_or(&token).to_string();
+            let entry = families.entry(family).or_insert_with(|| (0, Vec::new()));
+            entry.0 += 1;
+            if entry.1.len() < 6 && !entry.1.iter().any(|existing| existing == &token) {
+                entry.1.push(token.clone());
+            }
+        }
+    }
+
+    let mut out = families
+        .into_iter()
+        .map(|(name, (count, examples))| MessageFamilyRecord {
+            name,
+            count,
+            examples,
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    out.truncate(limit.max(1));
+    Ok(out)
+}
+
+fn extract_protocol_tokens(text: &str) -> Vec<String> {
+    text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|token| {
+            token.contains("TO")
+                && token.contains('_')
+                && token
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+        })
+        .map(ToString::to_string)
+        .collect()
+}
+
+async fn discover_version_clues(
+    root: &Path,
+    limit: usize,
+    cwd: &Path,
+) -> Result<Vec<VersionClueRecord>, FunctionCallError> {
+    let clues = run_rg_match_search(
+        "(protocolVersion|version|fver|sequence_id)",
+        None,
+        root,
+        limit * 4,
+        cwd,
+    )
+    .await?;
+    Ok(clues
+        .into_iter()
+        .take(limit.max(1))
+        .map(|found| VersionClueRecord {
+            path: found.path.display().to_string(),
+            line: found.line,
+            text: found.text,
+        })
+        .collect())
+}
+
+async fn run_rg_file_search(
+    pattern: &str,
+    include: Option<&str>,
+    search_path: &Path,
+    limit: usize,
+    cwd: &Path,
+) -> Result<Vec<PathBuf>, FunctionCallError> {
+    let output = run_rg_command(
+        pattern,
+        include,
+        search_path,
+        cwd,
+        &["--files-with-matches", "--sortr=modified"],
+    )
+    .await?;
+
+    match output.status.code() {
+        Some(0) => Ok(parse_file_results(&output.stdout, limit)),
+        Some(1) => Ok(Vec::new()),
+        _ => Err(rg_error(&output.stderr)),
+    }
+}
+
+async fn run_rg_match_search(
+    pattern: &str,
+    include: Option<&str>,
+    search_path: &Path,
+    limit: usize,
+    cwd: &Path,
+) -> Result<Vec<GrepMatch>, FunctionCallError> {
+    let output = run_rg_command(
+        pattern,
+        include,
+        search_path,
+        cwd,
+        &["--line-number", "--with-filename", "--color", "never"],
+    )
+    .await?;
+
+    match output.status.code() {
+        Some(0) => Ok(parse_match_results(&output.stdout, limit)),
+        Some(1) => Ok(Vec::new()),
+        _ => Err(rg_error(&output.stderr)),
+    }
+}
+
+async fn run_rg_files_listing(
+    search_path: &Path,
+    cwd: &Path,
+) -> Result<Vec<PathBuf>, FunctionCallError> {
+    let mut command = Command::new("rg");
+    command
+        .current_dir(cwd)
+        .arg("--files")
+        .arg("--no-messages")
+        .arg("--")
+        .arg(search_path);
+
+    match timeout(COMMAND_TIMEOUT, command.output())
+        .await
+        .map_err(|_| {
+            FunctionCallError::RespondToModel(
+                "rg file listing timed out after 30 seconds".to_string(),
+            )
+        })? {
+        Ok(output) if output.status.success() => Ok(parse_file_results(&output.stdout, usize::MAX)),
+        Ok(output) if output.status.code() == Some(1) => Ok(Vec::new()),
+        Ok(output) => Err(rg_error(&output.stderr)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let mut files = Vec::new();
+            collect_files_fallback(search_path, &mut files).await?;
+            Ok(files)
+        }
+        Err(err) => Err(FunctionCallError::RespondToModel(format!(
+            "failed to launch rg for file listing: {err}"
+        ))),
+    }
+}
+
+async fn collect_files_fallback(
+    root: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), FunctionCallError> {
+    let metadata = tokio::fs::metadata(root).await.map_err(|err| {
+        FunctionCallError::RespondToModel(format!("failed to inspect `{}`: {err}", root.display()))
+    })?;
+
+    if metadata.is_file() {
+        files.push(root.to_path_buf());
+        return Ok(());
+    }
+
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries = tokio::fs::read_dir(&dir).await.map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to read directory `{}`: {err}",
+                dir.display()
+            ))
+        })?;
+        while let Some(entry) = entries.next_entry().await.map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to iterate directory `{}`: {err}",
+                dir.display()
+            ))
+        })? {
+            let path = entry.path();
+            let file_type = entry.file_type().await.map_err(|err| {
+                FunctionCallError::RespondToModel(format!(
+                    "failed to inspect `{}`: {err}",
+                    path.display()
+                ))
+            })?;
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_rg_command(
+    pattern: &str,
+    include: Option<&str>,
+    search_path: &Path,
+    cwd: &Path,
+    extra_args: &[&str],
+) -> Result<std::process::Output, FunctionCallError> {
+    let files_only = extra_args.iter().any(|arg| *arg == "--files-with-matches");
+    let mut command = Command::new("rg");
+    command.current_dir(cwd);
+    for arg in extra_args {
+        command.arg(arg);
+    }
+    command.arg("--regexp").arg(pattern).arg("--no-messages");
+
+    if let Some(glob) = include {
+        command.arg("--glob").arg(glob);
+    }
+
+    command.arg("--").arg(search_path);
+
+    match timeout(COMMAND_TIMEOUT, command.output())
+        .await
+        .map_err(|_| {
+            FunctionCallError::RespondToModel("rg timed out after 30 seconds".to_string())
+        })? {
+        Ok(output) => Ok(output),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            run_grep_fallback(pattern, include, search_path, cwd, files_only).await
+        }
+        Err(err) => Err(FunctionCallError::RespondToModel(format!(
+            "failed to launch rg: {err}. Ensure ripgrep is installed and on PATH."
+        ))),
+    }
+}
+
+async fn run_grep_fallback(
+    pattern: &str,
+    include: Option<&str>,
+    search_path: &Path,
+    cwd: &Path,
+    files_only: bool,
+) -> Result<std::process::Output, FunctionCallError> {
+    let mut command = Command::new("grep");
+    command.current_dir(cwd).arg("-R");
+    if files_only {
+        command.arg("-l");
+    } else {
+        command.arg("-n").arg("-H");
+    }
+    if let Some(glob) = include {
+        command.arg(format!("--include={glob}"));
+    }
+    command.arg("-E").arg(pattern).arg(search_path);
+
+    timeout(COMMAND_TIMEOUT, command.output())
+        .await
+        .map_err(|_| {
+            FunctionCallError::RespondToModel(
+                "grep fallback timed out after 30 seconds".to_string(),
+            )
+        })?
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to launch rg, and grep fallback also failed: {err}"
+            ))
+        })
+}
+
+fn rg_error(stderr: &[u8]) -> FunctionCallError {
+    let stderr = String::from_utf8_lossy(stderr);
+    FunctionCallError::RespondToModel(format!("rg failed: {stderr}"))
+}
+
+fn parse_file_results(stdout: &[u8], limit: usize) -> Vec<PathBuf> {
+    stdout
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| {
+            if line.is_empty() {
+                return None;
+            }
+            std::str::from_utf8(line).ok().map(PathBuf::from)
+        })
+        .take(limit)
+        .collect()
+}
+
+fn parse_match_results(stdout: &[u8], limit: usize) -> Vec<GrepMatch> {
+    let mut matches = Vec::new();
+    for line in stdout.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(line) else {
+            continue;
+        };
+        let mut parts = text.splitn(3, ':');
+        let Some(path) = parts.next() else { continue };
+        let Some(line_no) = parts.next() else {
+            continue;
+        };
+        let Some(match_text) = parts.next() else {
+            continue;
+        };
+        let Ok(line) = line_no.parse::<usize>() else {
+            continue;
+        };
+        matches.push(GrepMatch {
+            path: PathBuf::from(path),
+            line,
+            text: match_text.to_string(),
+        });
+        if matches.len() == limit {
+            break;
+        }
+    }
+    matches
+}
+
+fn render_pipeline_value(value: PipelineValue) -> String {
+    match value {
+        PipelineValue::Files(files) => {
+            if files.is_empty() {
+                "No matches found.".to_string()
+            } else {
+                files
+                    .into_iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        PipelineValue::Matches(matches) => {
+            if matches.is_empty() {
+                "No matches found.".to_string()
+            } else {
+                matches
+                    .into_iter()
+                    .map(|found| {
+                        format!("{}:L{}: {}", found.path.display(), found.line, found.text)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        PipelineValue::Reads(reads) => render_read_artifacts(&reads),
+    }
+}
+
+fn render_read_artifacts(artifacts: &[ReadArtifact]) -> String {
+    if artifacts.is_empty() {
+        return "No reads produced.".to_string();
+    }
+    if artifacts.len() == 1 && artifacts[0].label.is_none() {
+        return artifacts[0].lines.join("\n");
+    }
+
+    let mut grouped: BTreeMap<String, Vec<&ReadArtifact>> = BTreeMap::new();
+    for artifact in artifacts {
+        grouped
+            .entry(artifact.path.display().to_string())
+            .or_default()
+            .push(artifact);
+    }
+
+    let mut sections = Vec::new();
+    for (path, artifacts) in grouped {
+        for artifact in artifacts {
+            let header = artifact
+                .label
+                .as_ref()
+                .map(|label| format!("==> {path} ({label})"))
+                .unwrap_or_else(|| format!("==> {path}"));
+            sections.push(format!("{header}\n{}", artifact.lines.join("\n")));
+        }
+    }
+    sections.join("\n\n")
+}
+
 mod slice {
     use crate::function_tool::FunctionCallError;
     use crate::tools::handlers::read_file::format_line;
@@ -581,6 +1404,51 @@ third
         Ok(())
     }
 
+    #[test]
+    fn parses_ripgrep_match_results() {
+        let stdout = b"/tmp/a.rs:12:fn alpha()\n/tmp/b.rs:44:let beta = 1;\n";
+        let parsed = parse_match_results(stdout, 10);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].path, PathBuf::from("/tmp/a.rs"));
+        assert_eq!(parsed[0].line, 12);
+        assert_eq!(parsed[0].text, "fn alpha()");
+        assert_eq!(parsed[1].path, PathBuf::from("/tmp/b.rs"));
+        assert_eq!(parsed[1].line, 44);
+    }
+
+    #[test]
+    fn renders_multi_artifact_output_with_headers() {
+        let rendered = render_read_artifacts(&[
+            ReadArtifact {
+                path: PathBuf::from("/tmp/a.rs"),
+                label: Some("match L12".to_string()),
+                lines: vec![
+                    "L10: fn alpha() {".to_string(),
+                    "L12:     beta();".to_string(),
+                ],
+            },
+            ReadArtifact {
+                path: PathBuf::from("/tmp/b.rs"),
+                label: None,
+                lines: vec!["L1: let gamma = 3;".to_string()],
+            },
+        ]);
+        assert!(rendered.contains("==> /tmp/a.rs (match L12)"));
+        assert!(rendered.contains("==> /tmp/b.rs"));
+        assert!(rendered.contains("L12:     beta();"));
+    }
+
+    #[test]
+    fn extracts_protocol_family_tokens_from_match_text() {
+        let tokens = extract_protocol_tokens("CLTOMA_FUSE_REGISTER and MATOCL_FUSE_REPLY");
+        assert_eq!(
+            tokens,
+            vec![
+                "CLTOMA_FUSE_REGISTER".to_string(),
+                "MATOCL_FUSE_REPLY".to_string()
+            ]
+        );
+    }
     #[tokio::test]
     async fn indentation_mode_captures_block() -> anyhow::Result<()> {
         let mut temp = NamedTempFile::new()?;

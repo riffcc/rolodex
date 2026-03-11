@@ -1189,6 +1189,31 @@ fn create_request_user_input_tool(
             description: Some("Single-sentence prompt shown to the user.".to_string()),
         },
     );
+    question_props.insert(
+        "allowMultiple".to_string(),
+        JsonSchema::Boolean {
+            description: Some(
+                "When true, the user may select multiple options for this question.".to_string(),
+            ),
+        },
+    );
+    question_props.insert(
+        "otherLabel".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional custom label for the automatic free-form choice, for example \"Enter more details\"."
+                    .to_string(),
+            ),
+        },
+    );
+    question_props.insert(
+        "otherDescription".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional custom description for the automatic free-form choice.".to_string(),
+            ),
+        },
+    );
     question_props.insert("options".to_string(), options_schema);
 
     let questions_schema = JsonSchema::Array {
@@ -3787,7 +3812,10 @@ mod tests {
         };
 
         assert!(tool.description.contains("protocol_map"));
-        assert!(tool.description.contains("Prefer `map: { preset: \"protocol_map\" }`"));
+        assert!(
+            tool.description
+                .contains("Prefer `map: { preset: \"protocol_map\" }`")
+        );
         assert!(tool.description.contains("actor graph"));
     }
 
@@ -3806,8 +3834,16 @@ mod tests {
         });
         let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
 
-        assert!(tools.iter().any(|tool| tool_name(&tool.spec) == "read_file"));
-        assert!(tools.iter().any(|tool| tool_name(&tool.spec) == "grep_files"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool_name(&tool.spec) == "read_file")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool_name(&tool.spec) == "grep_files")
+        );
         assert!(tools.iter().any(|tool| tool_name(&tool.spec) == "list_dir"));
     }
     fn test_build_specs_mcp_tools_converted() {

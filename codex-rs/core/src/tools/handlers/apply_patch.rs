@@ -138,73 +138,15 @@ impl ToolHandler for ApplyPatchHandler {
         let command = vec!["apply_patch".to_string(), patch_input.clone()];
         match codex_apply_patch::maybe_parse_apply_patch_verified(&command, &cwd) {
             codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
-                match apply_patch::apply_patch(turn.as_ref(), changes).await {
-                    InternalApplyPatchInvocation::Output(item) => {
-                        let content = item?;
-                        Ok(FunctionToolOutput::from_text(content, Some(true)))
-                    }
-                    InternalApplyPatchInvocation::DelegateToExec(apply) => {
-                        let changes = convert_apply_patch_to_protocol(&apply.action);
-                        let file_paths = file_paths_for_action(&apply.action);
-                        let effective_additional_permissions = apply_granted_turn_permissions(
-                            session.as_ref(),
-                            crate::sandboxing::SandboxPermissions::UseDefault,
-                            write_permissions_for_paths(&file_paths),
-                        )
-                        .await;
-                        let emitter =
-                            ToolEmitter::apply_patch(changes.clone(), apply.auto_approved);
-                        let event_ctx = ToolEventCtx::new(
-                            session.as_ref(),
-                            turn.as_ref(),
-                            &call_id,
-                            Some(&tracker),
-                        );
-                        emitter.begin(event_ctx).await;
-
-                        let req = ApplyPatchRequest {
-                            action: apply.action,
-                            file_paths,
-                            changes,
-                            exec_approval_requirement: apply.exec_approval_requirement,
-                            sandbox_permissions: effective_additional_permissions
-                                .sandbox_permissions,
-                            additional_permissions: effective_additional_permissions
-                                .additional_permissions,
-                            permissions_preapproved: effective_additional_permissions
-                                .permissions_preapproved,
-                            timeout_ms: None,
-                            codex_exe: turn.codex_linux_sandbox_exe.clone(),
-                        };
-
-                        let mut orchestrator = ToolOrchestrator::new();
-                        let mut runtime = ApplyPatchRuntime::new();
-                        let tool_ctx = ToolCtx {
-                            session: session.clone(),
-                            turn: turn.clone(),
-                            call_id: call_id.clone(),
-                            tool_name: tool_name.to_string(),
-                        };
-                        let out = orchestrator
-                            .run(
-                                &mut runtime,
-                                &req,
-                                &tool_ctx,
-                                turn.as_ref(),
-                                turn.approval_policy.value(),
-                            )
-                            .await
-                            .map(|result| result.output);
-                        let event_ctx = ToolEventCtx::new(
-                            session.as_ref(),
-                            turn.as_ref(),
-                            &call_id,
-                            Some(&tracker),
-                        );
-                        let content = emitter.finish(event_ctx, out).await?;
-                        Ok(FunctionToolOutput::from_text(content, Some(true)))
-                    }
-                }
+                run_verified_apply_patch_action(
+                    session,
+                    turn,
+                    tracker,
+                    call_id,
+                    tool_name.to_string(),
+                    changes,
+                )
+                .await
             }
             codex_apply_patch::MaybeApplyPatchVerified::CorrectnessError(parse_error) => {
                 Err(FunctionCallError::RespondToModel(format!(
@@ -222,6 +164,71 @@ impl ToolHandler for ApplyPatchHandler {
                     "apply_patch handler received non-apply_patch input".to_string(),
                 ))
             }
+        }
+    }
+}
+
+pub(crate) async fn run_verified_apply_patch_action(
+    session: Arc<Session>,
+    turn: Arc<TurnContext>,
+    tracker: SharedTurnDiffTracker,
+    call_id: String,
+    tool_name: String,
+    changes: ApplyPatchAction,
+) -> Result<FunctionToolOutput, FunctionCallError> {
+    match apply_patch::apply_patch(turn.as_ref(), changes).await {
+        InternalApplyPatchInvocation::Output(item) => {
+            let content = item?;
+            Ok(FunctionToolOutput::from_text(content, Some(true)))
+        }
+        InternalApplyPatchInvocation::DelegateToExec(apply) => {
+            let changes = convert_apply_patch_to_protocol(&apply.action);
+            let file_paths = file_paths_for_action(&apply.action);
+            let effective_additional_permissions = apply_granted_turn_permissions(
+                session.as_ref(),
+                crate::sandboxing::SandboxPermissions::UseDefault,
+                write_permissions_for_paths(&file_paths),
+            )
+            .await;
+            let emitter = ToolEmitter::apply_patch(changes.clone(), apply.auto_approved);
+            let event_ctx =
+                ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, Some(&tracker));
+            emitter.begin(event_ctx).await;
+
+            let req = ApplyPatchRequest {
+                action: apply.action,
+                file_paths,
+                changes,
+                exec_approval_requirement: apply.exec_approval_requirement,
+                sandbox_permissions: effective_additional_permissions.sandbox_permissions,
+                additional_permissions: effective_additional_permissions.additional_permissions,
+                permissions_preapproved: effective_additional_permissions.permissions_preapproved,
+                timeout_ms: None,
+                codex_exe: turn.codex_linux_sandbox_exe.clone(),
+            };
+
+            let mut orchestrator = ToolOrchestrator::new();
+            let mut runtime = ApplyPatchRuntime::new();
+            let tool_ctx = ToolCtx {
+                session: session.clone(),
+                turn: turn.clone(),
+                call_id: call_id.clone(),
+                tool_name,
+            };
+            let out = orchestrator
+                .run(
+                    &mut runtime,
+                    &req,
+                    &tool_ctx,
+                    turn.as_ref(),
+                    turn.approval_policy.value(),
+                )
+                .await
+                .map(|result| result.output);
+            let event_ctx =
+                ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, Some(&tracker));
+            let content = emitter.finish(event_ctx, out).await?;
+            Ok(FunctionToolOutput::from_text(content, Some(true)))
         }
     }
 }

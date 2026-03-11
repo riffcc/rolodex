@@ -165,14 +165,20 @@ impl TaskPickerEntry {
 
 #[derive(Clone, Debug)]
 enum TaskPickerMode {
-    Loading { message: String },
-    ProjectList { workspace: String },
+    Loading {
+        message: String,
+    },
+    ProjectList {
+        workspace: String,
+    },
     TaskList {
         workspace: String,
         project_slug: String,
         project_name: String,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -260,7 +266,10 @@ impl TaskPickerView {
                 project_name,
                 tasks,
             } => {
-                let entries = tasks.into_iter().map(TaskPickerEntry::Task).collect::<Vec<_>>();
+                let entries = tasks
+                    .into_iter()
+                    .map(TaskPickerEntry::Task)
+                    .collect::<Vec<_>>();
                 (
                     TaskPickerMode::TaskList {
                         workspace,
@@ -270,9 +279,7 @@ impl TaskPickerView {
                     entries,
                 )
             }
-            TaskPickerPayload::Error { message } => {
-                (TaskPickerMode::Error { message }, Vec::new())
-            }
+            TaskPickerPayload::Error { message } => (TaskPickerMode::Error { message }, Vec::new()),
         };
 
         let mut state = ScrollState::new();
@@ -428,7 +435,8 @@ impl TaskPickerView {
             } else {
                 plan_and_implement_prompt(&selected)
             };
-            self.app_event_tx.send(AppEvent::SetComposerText { text: prompt });
+            self.app_event_tx
+                .send(AppEvent::SetComposerText { text: prompt });
             return;
         }
 
@@ -445,7 +453,8 @@ impl TaskPickerView {
         } else {
             task.prompt.clone()
         };
-        self.app_event_tx.send(AppEvent::SetComposerText { text: prompt });
+        self.app_event_tx
+            .send(AppEvent::SetComposerText { text: prompt });
     }
 
     fn rows(&self) -> Vec<Line<'static>> {
@@ -479,7 +488,8 @@ impl TaskPickerView {
                             },
                         ),
                         Span::raw(" "),
-                        Span::raw(format!("{} · {}", project.workspace, project.project_slug)).dim(),
+                        Span::raw(format!("{} · {}", project.workspace, project.project_slug))
+                            .dim(),
                     ]),
                     TaskPickerEntry::Task(task) => {
                         let selectable = task.is_real_issue();
@@ -511,7 +521,8 @@ impl TaskPickerView {
                                 },
                             ),
                             Span::raw(" "),
-                            Span::raw(format!("{} · {}", task.source.label(), task.state.label())).dim(),
+                            Span::raw(format!("{} · {}", task.source.label(), task.state.label()))
+                                .dim(),
                         ]);
                         if let Some(issue) = &task.plane_issue_id {
                             line.spans.push(Span::raw(" "));
@@ -539,14 +550,22 @@ impl TaskPickerView {
                 Line::from(""),
                 Line::from(message.clone()),
                 Line::from(""),
-                Line::from("Press Esc to close and run /tasks again after fixing config/API access."),
+                Line::from(
+                    "Press Esc to close and run /tasks again after fixing config/API access.",
+                ),
             ];
         }
 
         if let Some(project) = self.focused_project() {
             let mut lines = vec![
                 Line::from(project.name.clone().bold()),
-                Line::from(format!("Workspace: {} · Project: {}", project.workspace, project.project_slug).dim()),
+                Line::from(
+                    format!(
+                        "Workspace: {} · Project: {}",
+                        project.workspace, project.project_slug
+                    )
+                    .dim(),
+                ),
                 Line::from(""),
                 Line::from(project.description.clone().unwrap_or_else(|| {
                     "Browse this project to load active Plane issues and summary rows.".to_string()
@@ -555,7 +574,9 @@ impl TaskPickerView {
                 Line::from("Press Enter to open this project."),
             ];
             if self.selected_ids.is_empty() {
-                lines.push(Line::from("Space/X actions apply only to real issue rows.".dim()));
+                lines.push(Line::from(
+                    "Space/X actions apply only to real issue rows.".dim(),
+                ));
             }
             return lines;
         }
@@ -583,7 +604,11 @@ impl TaskPickerView {
                 Line::from(""),
             ];
             for task in selected {
-                lines.push(Line::from(format!("• {} ({})", task.title, task.state.label())));
+                lines.push(Line::from(format!(
+                    "• {} ({})",
+                    task.title,
+                    task.state.label()
+                )));
             }
             return lines;
         }
@@ -1068,17 +1093,22 @@ fn find_project_config_for_cwd(cwd: &Path) -> anyhow::Result<Option<ProjectConfi
     Ok(None)
 }
 
-async fn load_project_tasks(cwd: &Path, config: ProjectConfig) -> anyhow::Result<TaskPickerPayload> {
+async fn load_project_tasks(
+    cwd: &Path,
+    config: ProjectConfig,
+) -> anyhow::Result<TaskPickerPayload> {
     let project_name = config
         .name
         .clone()
         .unwrap_or_else(|| config.project_slug.clone());
 
     let client = PlaneClient::new().context("Failed to initialize Plane client")?;
-    let issues = client
-        .list_active_issues(&config)
-        .await
-        .with_context(|| format!("Failed to list issues for {}/{}", config.workspace, config.project_slug))?;
+    let issues = client.list_active_issues(&config).await.with_context(|| {
+        format!(
+            "Failed to list issues for {}/{}",
+            config.workspace, config.project_slug
+        )
+    })?;
 
     let branch = codex_core::git_info::current_branch_name(cwd).await;
     let mut tasks = issues
@@ -1107,7 +1137,11 @@ fn issue_to_task_item(
     let state = task_state_from_plane_state(issue.state.as_deref());
 
     let mut details = Vec::new();
-    if let Some(priority) = issue.priority.as_deref().filter(|priority| !priority.is_empty()) {
+    if let Some(priority) = issue
+        .priority
+        .as_deref()
+        .filter(|priority| !priority.is_empty())
+    {
         details.push(format!("Priority: {priority}"));
     }
     details.push(format!("Workspace: {}", config.workspace));
@@ -1193,9 +1227,9 @@ fn task_state_from_plane_state(state: Option<&str>) -> TaskState {
 
 async fn list_workspace_projects(workspace: &str) -> anyhow::Result<Vec<TaskPickerProject>> {
     let global = GlobalConfig::load().context("Failed to load ~/.palace/config.yml")?;
-    let api_key = global
-        .plane_api_key()
-        .context("Plane API key not configured (set PLANE_API_KEY or ~/.palace/credentials.json)")?;
+    let api_key = global.plane_api_key().context(
+        "Plane API key not configured (set PLANE_API_KEY or ~/.palace/credentials.json)",
+    )?;
     let api_url = global.plane_url();
 
     let url = format!("{}/workspaces/{workspace}/projects/", api_url);
@@ -1240,7 +1274,11 @@ async fn list_workspace_projects(workspace: &str) -> anyhow::Result<Vec<TaskPick
         left.project_slug
             .to_ascii_lowercase()
             .cmp(&right.project_slug.to_ascii_lowercase())
-            .then(left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+            .then(
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase()),
+            )
     });
 
     Ok(projects)
@@ -1264,13 +1302,19 @@ struct PlaneProjectResponse {
 mod tests {
     use pretty_assertions::assert_eq;
 
-    use super::task_state_from_plane_state;
     use super::TaskState;
+    use super::task_state_from_plane_state;
 
     #[test]
     fn maps_plane_states_to_task_state() {
-        assert_eq!(task_state_from_plane_state(Some("In Progress")), TaskState::InProgress);
-        assert_eq!(task_state_from_plane_state(Some("Blocked")), TaskState::Blocked);
+        assert_eq!(
+            task_state_from_plane_state(Some("In Progress")),
+            TaskState::InProgress
+        );
+        assert_eq!(
+            task_state_from_plane_state(Some("Blocked")),
+            TaskState::Blocked
+        );
         assert_eq!(task_state_from_plane_state(Some("Done")), TaskState::Done);
         assert_eq!(task_state_from_plane_state(Some("Todo")), TaskState::Ready);
         assert_eq!(task_state_from_plane_state(None), TaskState::Ready);

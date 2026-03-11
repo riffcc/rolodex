@@ -94,18 +94,18 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::atomic::AtomicU16;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
-use tokio::select;
 use tokio::runtime::Handle;
+use tokio::select;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -710,7 +710,7 @@ pub(crate) struct App {
     primary_thread_id: Option<ThreadId>,
     primary_session_configured: Option<SessionConfiguredEvent>,
     pending_primary_events: VecDeque<Event>,
-    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    #[cfg(feature = "voice-input")]
     handy_gamepad: HandyGamepadState,
 }
 
@@ -721,7 +721,7 @@ struct WindowsSandboxState {
     skip_world_writable_scan_once: bool,
 }
 
-#[cfg(all(target_os = "linux", feature = "voice-input"))]
+#[cfg(feature = "voice-input")]
 #[derive(Default)]
 struct HandyGamepadState {
     continuous_mode: bool,
@@ -1960,7 +1960,7 @@ impl App {
             primary_thread_id: None,
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
-            #[cfg(all(target_os = "linux", feature = "voice-input"))]
+            #[cfg(feature = "voice-input")]
             handy_gamepad: HandyGamepadState::default(),
         };
 
@@ -3291,13 +3291,13 @@ impl App {
                 project_slug,
                 project_name,
             } => {
-                self.chat_widget.load_task_picker_project(
-                    workspace,
-                    project_slug,
-                    project_name,
-                );
+                self.chat_widget
+                    .load_task_picker_project(workspace, project_slug, project_name);
             }
-            AppEvent::TaskPickerPayloadLoaded { request_id, payload } => {
+            AppEvent::TaskPickerPayloadLoaded {
+                request_id,
+                payload,
+            } => {
                 self.chat_widget
                     .apply_task_picker_payload(request_id, payload);
             }
@@ -3907,7 +3907,7 @@ impl App {
     }
 
     fn handle_handy_push_to_talk(&mut self, pressed: bool) {
-        #[cfg(all(target_os = "linux", feature = "voice-input"))]
+        #[cfg(feature = "voice-input")]
         {
             const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(350);
             let now = Instant::now();
@@ -3936,20 +3936,24 @@ impl App {
             }
         }
 
-        #[cfg(not(all(target_os = "linux", feature = "voice-input")))]
+        #[cfg(not(feature = "voice-input"))]
         {
             let _ = pressed;
         }
     }
 
-    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    #[cfg(feature = "voice-input")]
     fn toggle_handy_continuous_mode(&mut self) {
         self.handy_gamepad.continuous_mode = !self.handy_gamepad.continuous_mode;
         if self.handy_gamepad.continuous_mode {
             Self::play_handy_chime();
             self.chat_widget.show_voice_overlay(
                 "Continuous Voice".to_string(),
-                Some("Back twice to stop. Speech stays local via Handy.".to_string()),
+                Some(if cfg!(target_os = "linux") {
+                    "Back twice to stop. Speech stays local via Handy.".to_string()
+                } else {
+                    "Back twice to stop. Release Back to transcribe.".to_string()
+                }),
             );
             self.start_handy_recording();
         } else {
@@ -3958,7 +3962,7 @@ impl App {
         }
     }
 
-    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    #[cfg(feature = "voice-input")]
     fn start_handy_recording(&mut self) {
         if self.handy_gamepad.voice.is_some() {
             return;
@@ -3979,7 +3983,11 @@ impl App {
                 if self.handy_gamepad.continuous_mode {
                     self.chat_widget.show_voice_overlay(
                         "Continuous Voice".to_string(),
-                        Some("Listening locally. Back twice to stop.".to_string()),
+                        Some(if cfg!(target_os = "linux") {
+                            "Listening locally. Back twice to stop.".to_string()
+                        } else {
+                            "Listening. Back twice to stop.".to_string()
+                        }),
                     );
                 }
             }
@@ -3990,7 +3998,7 @@ impl App {
         }
     }
 
-    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    #[cfg(feature = "voice-input")]
     fn stop_handy_recording(&mut self) {
         let Some(voice) = self.handy_gamepad.voice.take() else {
             return;
@@ -4039,7 +4047,7 @@ impl App {
         }
     }
 
-    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    #[cfg(feature = "voice-input")]
     fn spawn_handy_recording_meter(
         &self,
         id: String,
@@ -4065,7 +4073,7 @@ impl App {
         }
     }
 
-    #[cfg(all(target_os = "linux", feature = "voice-input"))]
+    #[cfg(feature = "voice-input")]
     fn play_handy_chime() {
         let _ = std::io::stderr().write_all(b"\x07");
         let _ = std::io::stderr().flush();
@@ -5859,7 +5867,7 @@ mod tests {
             primary_thread_id: None,
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
-            #[cfg(all(target_os = "linux", feature = "voice-input"))]
+            #[cfg(feature = "voice-input")]
             handy_gamepad: HandyGamepadState::default(),
         }
     }

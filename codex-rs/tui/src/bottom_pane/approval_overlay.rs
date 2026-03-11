@@ -153,7 +153,10 @@ impl ApprovalOverlay {
         app_event_tx: AppEventSender,
     ) -> (Vec<ApprovalOption>, ApprovalInteractionView) {
         if let Some(picker) = build_permission_picker(request, app_event_tx.clone()) {
-            return (Vec::new(), ApprovalInteractionView::PermissionPicker(picker));
+            return (
+                Vec::new(),
+                ApprovalInteractionView::PermissionPicker(picker),
+            );
         }
 
         let (options, title) = match request {
@@ -213,7 +216,10 @@ impl ApprovalOverlay {
             ..Default::default()
         };
 
-        (options, ApprovalInteractionView::List(ListSelectionView::new(params, app_event_tx)))
+        (
+            options,
+            ApprovalInteractionView::List(ListSelectionView::new(params, app_event_tx)),
+        )
     }
 
     fn apply_selection(&mut self, actual_idx: usize) {
@@ -351,23 +357,21 @@ impl ApprovalOverlay {
                     false
                 }
             }
-            e => {
-                match &self.interaction_view {
-                    ApprovalInteractionView::List(_) => {
-                        if let Some(idx) = self
-                            .options
-                            .iter()
-                            .position(|opt| opt.shortcuts().any(|s| s.is_press(*e)))
-                        {
-                            self.apply_selection(idx);
-                            true
-                        } else {
-                            false
-                        }
+            e => match &self.interaction_view {
+                ApprovalInteractionView::List(_) => {
+                    if let Some(idx) = self
+                        .options
+                        .iter()
+                        .position(|opt| opt.shortcuts().any(|s| s.is_press(*e)))
+                    {
+                        self.apply_selection(idx);
+                        true
+                    } else {
+                        false
                     }
-                    ApprovalInteractionView::PermissionPicker(_) => false,
                 }
-            }
+                ApprovalInteractionView::PermissionPicker(_) => false,
+            },
         }
     }
 }
@@ -662,10 +666,12 @@ fn build_permission_picker(
         return None;
     };
 
-    if !available_decisions
-        .iter()
-        .any(|decision| matches!(decision, ReviewDecision::ApprovedAdditionalPermissions { .. }))
-    {
+    if !available_decisions.iter().any(|decision| {
+        matches!(
+            decision,
+            ReviewDecision::ApprovedAdditionalPermissions { .. }
+        )
+    }) {
         return None;
     }
 
@@ -730,8 +736,10 @@ fn build_permission_picker(
                 ReviewDecision::ApprovedAdditionalPermissions { permission_profile }
             };
             if confirm_thread_label.is_none() {
-                let cell =
-                    history_cell::new_approval_decision_cell(confirm_command.clone(), decision.clone());
+                let cell = history_cell::new_approval_decision_cell(
+                    confirm_command.clone(),
+                    decision.clone(),
+                );
                 tx.send(AppEvent::InsertHistoryCell(cell));
             }
             tx.send(AppEvent::SubmitThreadOp {
@@ -746,8 +754,10 @@ fn build_permission_picker(
         .on_cancel(move |tx| {
             let decision = ReviewDecision::Abort;
             if cancel_thread_label.is_none() {
-                let cell =
-                    history_cell::new_approval_decision_cell(cancel_command.clone(), decision.clone());
+                let cell = history_cell::new_approval_decision_cell(
+                    cancel_command.clone(),
+                    decision.clone(),
+                );
                 tx.send(AppEvent::InsertHistoryCell(cell));
             }
             tx.send(AppEvent::SubmitThreadOp {
@@ -763,7 +773,9 @@ fn build_permission_picker(
     )
 }
 
-fn permission_profile_selections(permission_profile: &PermissionProfile) -> Vec<PermissionSelection> {
+fn permission_profile_selections(
+    permission_profile: &PermissionProfile,
+) -> Vec<PermissionSelection> {
     let mut selections = Vec::new();
 
     if permission_profile
@@ -824,7 +836,9 @@ fn permission_profile_selections(permission_profile: &PermissionProfile) -> Vec<
             MacOsAutomationPermission::All => selections.push(PermissionSelection {
                 id: "macos-automation:all".to_string(),
                 name: "macOS automation (all)".to_string(),
-                description: Some("Allow controlling any app through macOS automation.".to_string()),
+                description: Some(
+                    "Allow controlling any app through macOS automation.".to_string(),
+                ),
                 kind: PermissionSelectionKind::MacOsAutomationAll,
             }),
             MacOsAutomationPermission::BundleIds(bundle_ids) => {
@@ -866,7 +880,10 @@ fn permission_profile_from_selection_ids(
     selections: &[PermissionSelection],
     selected_ids: &[String],
 ) -> PermissionProfile {
-    let selected_ids = selected_ids.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let selected_ids = selected_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
     let mut permission_profile = PermissionProfile::default();
     let mut read_paths = Vec::new();
     let mut write_paths = Vec::new();
@@ -884,28 +901,40 @@ fn permission_profile_from_selection_ids(
                 });
             }
             PermissionSelectionKind::FileSystemRead(path) => {
-                read_paths.push(AbsolutePathBuf::from_absolute_path(path.clone()).expect("absolute path"));
+                read_paths.push(
+                    AbsolutePathBuf::from_absolute_path(path.clone()).expect("absolute path"),
+                );
             }
             PermissionSelectionKind::FileSystemWrite(path) => {
-                write_paths.push(AbsolutePathBuf::from_absolute_path(path.clone()).expect("absolute path"));
+                write_paths.push(
+                    AbsolutePathBuf::from_absolute_path(path.clone()).expect("absolute path"),
+                );
             }
             PermissionSelectionKind::MacOsPreferences(permission) => {
-                let macos = permission_profile.macos.get_or_insert_with(Default::default);
+                let macos = permission_profile
+                    .macos
+                    .get_or_insert_with(Default::default);
                 macos.macos_preferences = permission.clone();
             }
             PermissionSelectionKind::MacOsAutomationAll => {
-                let macos = permission_profile.macos.get_or_insert_with(Default::default);
+                let macos = permission_profile
+                    .macos
+                    .get_or_insert_with(Default::default);
                 macos.macos_automation = MacOsAutomationPermission::All;
             }
             PermissionSelectionKind::MacOsAutomationBundleId(bundle_id) => {
                 automation_bundle_ids.push(bundle_id.clone());
             }
             PermissionSelectionKind::MacOsAccessibility => {
-                let macos = permission_profile.macos.get_or_insert_with(Default::default);
+                let macos = permission_profile
+                    .macos
+                    .get_or_insert_with(Default::default);
                 macos.macos_accessibility = true;
             }
             PermissionSelectionKind::MacOsCalendar => {
-                let macos = permission_profile.macos.get_or_insert_with(Default::default);
+                let macos = permission_profile
+                    .macos
+                    .get_or_insert_with(Default::default);
                 macos.macos_calendar = true;
             }
         }
@@ -919,7 +948,9 @@ fn permission_profile_from_selection_ids(
     }
 
     if !automation_bundle_ids.is_empty() {
-        let macos = permission_profile.macos.get_or_insert_with(Default::default);
+        let macos = permission_profile
+            .macos
+            .get_or_insert_with(Default::default);
         macos.macos_automation = MacOsAutomationPermission::BundleIds(automation_bundle_ids);
     }
 
@@ -944,8 +975,8 @@ fn exec_options(
                 display_shortcut: None,
                 additional_shortcuts: vec![key_hint::plain(KeyCode::Char('y'))],
             }),
-            ReviewDecision::ApprovedAdditionalPermissions { permission_profile } => Some(
-                ApprovalOption {
+            ReviewDecision::ApprovedAdditionalPermissions { permission_profile } => {
+                Some(ApprovalOption {
                     label: format!(
                         "Yes, choose permissions{}",
                         format_additional_permissions_rule(permission_profile)
@@ -959,8 +990,8 @@ fn exec_options(
                     ),
                     display_shortcut: None,
                     additional_shortcuts: vec![key_hint::plain(KeyCode::Char('x'))],
-                },
-            ),
+                })
+            }
             ReviewDecision::ApprovedExecpolicyAmendment {
                 proposed_execpolicy_amendment,
             } => {

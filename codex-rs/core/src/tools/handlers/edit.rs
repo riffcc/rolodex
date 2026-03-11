@@ -112,31 +112,24 @@ impl ToolHandler for EditHandler {
         let command = vec!["apply_patch".to_string(), patch];
         match codex_apply_patch::maybe_parse_apply_patch_verified(&command, &turn.cwd) {
             codex_apply_patch::MaybeApplyPatchVerified::Body(action) => {
-                run_verified_apply_patch_action(
-                    session,
-                    turn,
-                    tracker,
-                    call_id,
-                    tool_name,
-                    action,
-                )
-                .await
+                run_verified_apply_patch_action(session, turn, tracker, call_id, tool_name, action)
+                    .await
             }
             codex_apply_patch::MaybeApplyPatchVerified::CorrectnessError(error) => {
                 Err(FunctionCallError::RespondToModel(format!(
                     "edit generated an invalid patch: {error}"
                 )))
             }
-            codex_apply_patch::MaybeApplyPatchVerified::ShellParseError(error) => Err(
-                FunctionCallError::RespondToModel(format!(
+            codex_apply_patch::MaybeApplyPatchVerified::ShellParseError(error) => {
+                Err(FunctionCallError::RespondToModel(format!(
                     "edit generated an unparsable patch wrapper: {error:?}"
-                )),
-            ),
-            codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => Err(
-                FunctionCallError::RespondToModel(
+                )))
+            }
+            codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => {
+                Err(FunctionCallError::RespondToModel(
                     "edit generated a non-apply_patch payload".to_string(),
-                ),
-            ),
+                ))
+            }
         }
     }
 }
@@ -321,7 +314,10 @@ fn apply_operation(
             file.current_content = Some(content.clone());
             Ok(())
         }
-        EditOperation::Delete { path, ignore_missing } => {
+        EditOperation::Delete {
+            path,
+            ignore_missing,
+        } => {
             let path = resolve_path(cwd, path);
             let file = ensure_loaded(files, &path)?;
             if file.current_content.is_none() && !ignore_missing.unwrap_or(false) {

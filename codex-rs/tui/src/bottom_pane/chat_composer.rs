@@ -4088,7 +4088,6 @@ impl ChatComposer {
             thread::spawn(task);
         }
     }
-
 }
 
 fn skill_display_name(skill: &SkillMetadata) -> &str {

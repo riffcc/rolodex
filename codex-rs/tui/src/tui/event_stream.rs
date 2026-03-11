@@ -442,12 +442,7 @@ impl GamepadState {
         }
     }
 
-    fn set_button(
-        &mut self,
-        button: Button,
-        pressed: bool,
-        tx: &mpsc::UnboundedSender<TuiEvent>,
-    ) {
+    fn set_button(&mut self, button: Button, pressed: bool, tx: &mpsc::UnboundedSender<TuiEvent>) {
         match button {
             Button::DPadUp => self.dpad_up = pressed,
             Button::DPadDown => self.dpad_down = pressed,
@@ -497,12 +492,12 @@ impl GamepadState {
         let right_strength = axis_strength(self.left_x, true);
         let up_strength = axis_strength(-self.left_y, true);
         let down_strength = axis_strength(self.left_y, true);
-        let focus_prev_strength = self
-            .left_trigger_axis
-            .max(if self.focus_prev_button { 1.0 } else { 0.0 });
-        let focus_next_strength = self
-            .right_trigger_axis
-            .max(if self.focus_next_button { 1.0 } else { 0.0 });
+        let focus_prev_strength =
+            self.left_trigger_axis
+                .max(if self.focus_prev_button { 1.0 } else { 0.0 });
+        let focus_next_strength =
+            self.right_trigger_axis
+                .max(if self.focus_next_button { 1.0 } else { 0.0 });
         let page_prev_strength = if self.page_prev_button { 1.0 } else { 0.0 };
         let page_next_strength = if self.page_next_button { 1.0 } else { 0.0 };
 
@@ -732,7 +727,10 @@ mod tests {
             .expect("send first gamepad event");
 
         let next = timeout(Duration::from_millis(25), stream.next()).await;
-        assert!(next.is_err(), "unfocused stream should not yield a gamepad event");
+        assert!(
+            next.is_err(),
+            "unfocused stream should not yield a gamepad event"
+        );
 
         terminal_focused.store(true, Ordering::Relaxed);
         gamepad_tx

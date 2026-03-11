@@ -111,8 +111,7 @@ fn select_layers(rel_path: &str, edited_file_count: usize) -> Vec<CodeLayer> {
 
     let supported = matches!(
         extension,
-        "rs"
-            | "py"
+        "rs" | "py"
             | "js"
             | "jsx"
             | "mjs"
