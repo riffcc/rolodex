@@ -1232,7 +1232,7 @@ async fn list_workspace_projects(workspace: &str) -> anyhow::Result<Vec<TaskPick
     )?;
     let api_url = global.plane_url();
 
-    let url = format!("{}/workspaces/{workspace}/projects/", api_url);
+    let url = format!("{api_url}/workspaces/{workspace}/projects/");
     let response = reqwest::Client::new()
         .get(url)
         .header("X-API-Key", api_key)

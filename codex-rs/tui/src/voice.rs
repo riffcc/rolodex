@@ -20,19 +20,19 @@ use handy_core::transcribe_default;
 use hound::SampleFormat;
 use hound::WavSpec;
 use hound::WavWriter;
+use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
 use std::fs;
-use std::collections::VecDeque;
 use std::io::Cursor;
 #[cfg(target_os = "linux")]
 use std::path::Path;
-#[cfg(target_os = "linux")]
-use tar::Archive;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
+#[cfg(target_os = "linux")]
+use tar::Archive;
 use tracing::error;
 use tracing::trace;
 
@@ -262,7 +262,6 @@ pub fn transcribe_async(
                 }),
             }
         });
-        return;
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -319,9 +318,7 @@ pub fn transcribe_async(
 #[cfg(target_os = "linux")]
 fn ensure_local_voice_assets() -> Result<(), String> {
     let handy_root = handy_root()?;
-    let model_dir = handy_root
-        .join("models")
-        .join(local_voice_model_dirname());
+    let model_dir = handy_root.join("models").join(local_voice_model_dirname());
     let ready_marker = model_dir.join("encoder-model.int8.onnx");
     let settings_path = handy_root.join("settings_store.json");
 
@@ -438,8 +435,7 @@ fn write_local_voice_settings(settings_path: &Path) -> Result<(), String> {
         "{{\"settings\":{{\"selected_language\":\"auto\",\"selected_model\":\"{}\",\"translate_to_english\":false}}}}",
         local_voice_model_id()
     );
-    fs::write(settings_path, body)
-        .map_err(|e| format!("failed to write local voice settings: {e}"))
+    fs::write(settings_path, body).map_err(|e| format!("failed to write local voice settings: {e}"))
 }
 
 #[cfg(target_os = "linux")]
