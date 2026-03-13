@@ -253,6 +253,12 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_input_focus(&mut self, has_input_focus: bool) {
+        self.has_input_focus = has_input_focus;
+        self.composer.set_has_focus(has_input_focus);
+        self.request_redraw();
+    }
+
     /// Update image-paste behavior for the active composer and repaint immediately.
     ///
     /// Callers use this to keep composer affordances aligned with model capabilities.

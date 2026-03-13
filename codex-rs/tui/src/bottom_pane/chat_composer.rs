@@ -145,7 +145,6 @@ use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Block;
 use ratatui::widgets::Paragraph;
-use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
 
 use super::chat_composer_history::ChatComposerHistory;
@@ -3719,7 +3718,7 @@ impl ChatComposer {
             .map(str::to_string)
     }
 
-    fn set_has_focus(&mut self, has_focus: bool) {
+    pub(crate) fn set_has_focus(&mut self, has_focus: bool) {
         self.has_focus = has_focus;
     }
 

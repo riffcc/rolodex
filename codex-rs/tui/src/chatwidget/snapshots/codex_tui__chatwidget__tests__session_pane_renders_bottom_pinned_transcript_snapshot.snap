@@ -1,0 +1,18 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: term.backend().vt100().screen().contents()
+---
+  middle assistant line 1
+  middle assistant line 2
+
+
+› new user
+
+  new assistant line 1
+  new assistant line 2
+  new assistant line 3
+
+
+› pane input
+
+                               100% context left

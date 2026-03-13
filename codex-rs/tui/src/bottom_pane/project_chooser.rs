@@ -3,7 +3,10 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::app_event::AppEvent;
+use crate::app_event::ProjectOpenTarget;
 use crate::app_event::ProjectTabPlacement;
+use crate::app_event::SplitAxis;
+use crate::app_event::SplitPaneTarget;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPaneView;
 use crate::bottom_pane::CancellationEvent;
@@ -47,7 +50,7 @@ enum BrowserItem {
 pub(crate) struct ProjectChooserView {
     app_event_tx: AppEventSender,
     complete: bool,
-    placement: ProjectTabPlacement,
+    target: ProjectOpenTarget,
     favorites: Vec<FavoriteProjectTile>,
     recents: Vec<PathBuf>,
     browser_root: PathBuf,
@@ -63,14 +66,14 @@ impl ProjectChooserView {
         favorites: Vec<FavoriteProjectTile>,
         recents: Vec<PathBuf>,
         initial_root: Option<PathBuf>,
-        placement: ProjectTabPlacement,
+        target: ProjectOpenTarget,
     ) -> Self {
         let browser_root = preferred_browser_root(initial_root);
         let browser_items = build_browser_items(&browser_root, &recents);
         Self {
             app_event_tx,
             complete: false,
-            placement,
+            target,
             favorites,
             recents,
             browser_root,
@@ -81,10 +84,18 @@ impl ProjectChooserView {
         }
     }
 
-    fn placement_label(&self) -> &'static str {
-        match self.placement {
-            ProjectTabPlacement::Left => "left",
-            ProjectTabPlacement::Right => "right",
+    fn target_title(&self) -> &'static str {
+        match self.target {
+            ProjectOpenTarget::Tab(ProjectTabPlacement::Left) => "Open Project In LEFT Tab",
+            ProjectOpenTarget::Tab(ProjectTabPlacement::Right) => "Open Project In RIGHT Tab",
+            ProjectOpenTarget::SplitPane(SplitPaneTarget {
+                axis: SplitAxis::Horizontal,
+                ..
+            }) => "Open Project In New Horizontal Pane",
+            ProjectOpenTarget::SplitPane(SplitPaneTarget {
+                axis: SplitAxis::Vertical,
+                ..
+            }) => "Open Project In New Vertical Pane",
         }
     }
 
@@ -105,9 +116,9 @@ impl ProjectChooserView {
 
     fn open_project(&mut self, cwd: PathBuf) {
         self.app_event_tx
-            .send(AppEvent::FocusOrOpenProjectWithPlacement {
+            .send(AppEvent::FocusOrOpenProjectAtTarget {
                 cwd,
-                placement: self.placement,
+                target: self.target,
             });
         self.complete = true;
     }
@@ -235,7 +246,10 @@ impl BottomPaneView for ProjectChooserView {
 
 impl Renderable for ProjectChooserView {
     fn desired_height(&self, _width: u16) -> u16 {
-        26
+        match self.target {
+            ProjectOpenTarget::Tab(_) => 26,
+            ProjectOpenTarget::SplitPane(_) => 34,
+        }
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -254,11 +268,7 @@ impl Renderable for ProjectChooserView {
                 .areas(body_area);
 
         Paragraph::new(vec![
-            Line::from(format!(
-                "Open Project In {} Tab",
-                self.placement_label().to_ascii_uppercase()
-            ))
-            .bold(),
+            Line::from(self.target_title()).bold(),
             Line::from("Choose a favorite, or browse into a directory and press Enter.".dim()),
             Line::from(format_directory_display(&self.browser_root, None).dim()),
         ])
@@ -408,7 +418,10 @@ fn list_child_directories(root: &Path) -> std::io::Result<Vec<PathBuf>> {
 mod tests {
     use super::ProjectChooserView;
     use crate::app_event::AppEvent;
+    use crate::app_event::ProjectOpenTarget;
     use crate::app_event::ProjectTabPlacement;
+    use crate::app_event::SplitAxis;
+    use crate::app_event::SplitPaneTarget;
     use crate::app_event_sender::AppEventSender;
     use crate::bottom_pane::BottomPaneView;
     use crate::bottom_pane::FavoriteProjectTile;
@@ -419,6 +432,7 @@ mod tests {
     use insta::assert_snapshot;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+    use std::path::Path;
     use std::path::PathBuf;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -453,7 +467,7 @@ mod tests {
             }],
             vec![PathBuf::from("/workspace/dragonfly")],
             Some(PathBuf::from("/workspace")),
-            ProjectTabPlacement::Right,
+            ProjectOpenTarget::Tab(ProjectTabPlacement::Right),
         );
         (view, rx)
     }
@@ -466,9 +480,9 @@ mod tests {
 
         assert!(matches!(
             rx.try_recv().expect("expected chooser event"),
-            AppEvent::FocusOrOpenProjectWithPlacement { cwd, placement }
-                if cwd == PathBuf::from("/workspace/codex")
-                    && placement == ProjectTabPlacement::Right
+            AppEvent::FocusOrOpenProjectAtTarget { cwd, target }
+                if cwd == Path::new("/workspace/codex")
+                    && target == ProjectOpenTarget::Tab(ProjectTabPlacement::Right)
         ));
         assert!(view.is_complete());
     }
@@ -477,5 +491,26 @@ mod tests {
     fn project_chooser_snapshot() {
         let (view, _rx) = make_view();
         assert_snapshot!("project_chooser", render_snapshot(&view, 80));
+    }
+
+    #[test]
+    fn split_pane_project_chooser_snapshot() {
+        let (tx, _rx) = unbounded_channel();
+        let view = ProjectChooserView::new(
+            AppEventSender::new(tx),
+            vec![FavoriteProjectTile {
+                cwd: PathBuf::from("/workspace/codex"),
+                label: "codex".to_string(),
+                description: None,
+                is_open: true,
+            }],
+            vec![PathBuf::from("/workspace/dragonfly")],
+            Some(PathBuf::from("/workspace")),
+            ProjectOpenTarget::SplitPane(SplitPaneTarget {
+                pane_id: 7,
+                axis: SplitAxis::Horizontal,
+            }),
+        );
+        assert_snapshot!("split_pane_project_chooser", render_snapshot(&view, 80));
     }
 }

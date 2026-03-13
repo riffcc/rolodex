@@ -73,6 +73,24 @@ pub(crate) enum ProjectTabPlacement {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SplitPaneTarget {
+    pub(crate) pane_id: u64,
+    pub(crate) axis: SplitAxis,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectOpenTarget {
+    Tab(ProjectTabPlacement),
+    SplitPane(SplitPaneTarget),
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
@@ -87,10 +105,10 @@ pub(crate) enum AppEvent {
     FocusOrOpenProject {
         cwd: PathBuf,
     },
-    /// Focus an existing project tab for the cwd or open it beside the current tab.
-    FocusOrOpenProjectWithPlacement {
+    /// Focus an existing project tab or split pane session for the cwd, or open it if needed.
+    FocusOrOpenProjectAtTarget {
         cwd: PathBuf,
-        placement: ProjectTabPlacement,
+        target: ProjectOpenTarget,
     },
     /// Add or remove the provided cwd from persisted favorites.
     ToggleFavoriteProject {

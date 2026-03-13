@@ -13,6 +13,7 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::FeedbackAudience;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::MentionBinding;
+use crate::history_cell::AgentMessageCell;
 use crate::history_cell::UserHistoryCell;
 use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
@@ -118,6 +119,7 @@ use serial_test::serial;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tempfile::tempdir;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -10357,6 +10359,84 @@ async fn chatwidget_tall() {
         chat.render(f.area(), f.buffer_mut());
     })
     .unwrap();
+    assert_snapshot!(term.backend().vt100().screen().contents());
+}
+
+#[tokio::test]
+async fn chatwidget_full_height_pins_bottom_pane() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    let width: u16 = 80;
+    let height: u16 = 18;
+    let backend = VT100Backend::new(width, height);
+    let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+    term.set_viewport_area(Rect::new(0, 0, width, height));
+    term.draw(|f| {
+        chat.render(f.area(), f.buffer_mut());
+    })
+    .unwrap();
+
+    assert_snapshot!(term.backend().vt100().screen().contents());
+}
+
+#[tokio::test]
+async fn session_pane_renders_bottom_pinned_transcript_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.bottom_pane
+        .set_composer_text("pane input".to_string(), Vec::new(), Vec::new());
+
+    let transcript_cells: Vec<Arc<dyn HistoryCell>> = vec![
+        Arc::new(UserHistoryCell {
+            message: "old user".to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: Vec::new(),
+        }) as Arc<dyn HistoryCell>,
+        Arc::new(AgentMessageCell::new(
+            vec![Line::from("old assistant")],
+            false,
+        )) as Arc<dyn HistoryCell>,
+        Arc::new(UserHistoryCell {
+            message: "middle user".to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: Vec::new(),
+        }) as Arc<dyn HistoryCell>,
+        Arc::new(AgentMessageCell::new(
+            vec![
+                Line::from("middle assistant line 1"),
+                Line::from("middle assistant line 2"),
+            ],
+            false,
+        )) as Arc<dyn HistoryCell>,
+        Arc::new(UserHistoryCell {
+            message: "new user".to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: Vec::new(),
+        }) as Arc<dyn HistoryCell>,
+        Arc::new(AgentMessageCell::new(
+            vec![
+                Line::from("new assistant line 1"),
+                Line::from("new assistant line 2"),
+                Line::from("new assistant line 3"),
+            ],
+            false,
+        )) as Arc<dyn HistoryCell>,
+    ];
+
+    let width: u16 = 50;
+    let height: u16 = 14;
+    let backend = VT100Backend::new(width, height);
+    let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+    term.set_viewport_area(Rect::new(0, 0, width, height));
+    term.draw(|f| {
+        chat.render_session_pane(f.area(), f.buffer_mut(), &transcript_cells);
+    })
+    .unwrap();
+
     assert_snapshot!(term.backend().vt100().screen().contents());
 }
 

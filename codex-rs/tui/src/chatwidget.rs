@@ -163,6 +163,7 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Text;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use tokio::sync::mpsc::UnboundedSender;
@@ -5416,6 +5417,10 @@ impl ChatWidget {
         self.bottom_pane.set_pending_thread_approvals(threads);
     }
 
+    pub(crate) fn set_input_focus(&mut self, has_input_focus: bool) {
+        self.bottom_pane.set_input_focus(has_input_focus);
+    }
+
     pub(crate) fn add_diff_in_progress(&mut self) {
         self.request_redraw();
     }
@@ -8929,18 +8934,142 @@ impl ChatWidget {
         self.token_info = None;
     }
 
-    fn as_renderable(&self) -> RenderableItem<'_> {
-        let active_cell_renderable = match &self.active_cell {
+    fn as_renderable(&self, fill_height: bool) -> RenderableItem<'_> {
+        let active_cell_renderable: RenderableItem<'_> = match &self.active_cell {
             Some(cell) => RenderableItem::Borrowed(cell).inset(Insets::tlbr(1, 0, 0, 0)),
             None => RenderableItem::Owned(Box::new(())),
         };
         let mut flex = FlexRenderable::new();
+        let active_cell_renderable = if fill_height {
+            RenderableItem::Owned(Box::new(FillHeightRenderable::new(active_cell_renderable)))
+        } else {
+            active_cell_renderable
+        };
         flex.push(1, active_cell_renderable);
         flex.push(
             0,
             RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(1, 0, 0, 0)),
         );
         RenderableItem::Owned(Box::new(flex))
+    }
+}
+
+struct FillHeightRenderable<'a> {
+    child: RenderableItem<'a>,
+}
+
+impl<'a> FillHeightRenderable<'a> {
+    fn new(child: RenderableItem<'a>) -> Self {
+        Self { child }
+    }
+}
+
+impl Renderable for FillHeightRenderable<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.child.render(area, buf);
+    }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        u16::MAX
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        self.child.cursor_pos(area)
+    }
+}
+
+struct HistoryCellRenderable<'a> {
+    cell: &'a dyn HistoryCell,
+}
+
+impl Renderable for HistoryCellRenderable<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let lines = self.cell.display_lines(area.width);
+        let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        let y = if area.height == 0 {
+            0
+        } else {
+            let overflow = paragraph
+                .line_count(area.width)
+                .saturating_sub(usize::from(area.height));
+            u16::try_from(overflow).unwrap_or(u16::MAX)
+        };
+        paragraph.scroll((y, 0)).render(area, buf);
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.cell.desired_height(width)
+    }
+}
+
+struct TranscriptEntry<'a> {
+    top_padding: u16,
+    renderable: HistoryCellRenderable<'a>,
+}
+
+struct SessionTranscriptRenderable<'a> {
+    entries: Vec<TranscriptEntry<'a>>,
+}
+
+impl<'a> SessionTranscriptRenderable<'a> {
+    fn new(
+        transcript_cells: &'a [Arc<dyn HistoryCell>],
+        active_cell: Option<&'a dyn HistoryCell>,
+    ) -> Self {
+        let mut entries = transcript_cells
+            .iter()
+            .enumerate()
+            .map(|(index, cell)| TranscriptEntry {
+                top_padding: u16::from(index > 0 && !cell.is_stream_continuation()),
+                renderable: HistoryCellRenderable {
+                    cell: cell.as_ref(),
+                },
+            })
+            .collect::<Vec<_>>();
+        if let Some(cell) = active_cell {
+            entries.push(TranscriptEntry {
+                top_padding: u16::from(
+                    !transcript_cells.is_empty() && !cell.is_stream_continuation(),
+                ),
+                renderable: HistoryCellRenderable { cell },
+            });
+        }
+        Self { entries }
+    }
+}
+
+impl Renderable for SessionTranscriptRenderable<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let total_height = self.desired_height(area.width);
+        let scroll_top = total_height.saturating_sub(area.height);
+        let visible_bottom = scroll_top.saturating_add(area.height);
+        let mut virtual_y = 0u16;
+
+        for entry in &self.entries {
+            let cell_height = entry.renderable.desired_height(area.width);
+            let cell_top = virtual_y.saturating_add(entry.top_padding);
+            let cell_bottom = cell_top.saturating_add(cell_height);
+            if cell_bottom > scroll_top && cell_top < visible_bottom {
+                let visible_top = cell_top.max(scroll_top);
+                let visible_height = cell_bottom.saturating_sub(visible_top);
+                let draw_y = area
+                    .y
+                    .saturating_add(visible_top.saturating_sub(scroll_top));
+                let draw_area = Rect::new(area.x, draw_y, area.width, visible_height);
+                if !draw_area.is_empty() {
+                    entry.renderable.render(draw_area, buf);
+                }
+            }
+            virtual_y = cell_bottom;
+        }
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.entries.iter().fold(0u16, |height, entry| {
+            height
+                .saturating_add(entry.top_padding)
+                .saturating_add(entry.renderable.desired_height(width))
+        })
     }
 }
 
@@ -9011,6 +9140,52 @@ impl ChatWidget {
     pub(crate) fn project_tabs_line(&self, width: u16) -> Option<Line<'static>> {
         self.project_tabs.render_line_for_width(width)
     }
+
+    pub(crate) fn render_session_pane(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        transcript_cells: &[Arc<dyn HistoryCell>],
+    ) {
+        let desired_bottom_height = self.bottom_pane.desired_height(area.width);
+        let bottom_total_height = desired_bottom_height.saturating_add(1).min(area.height);
+        let transcript_height = area.height.saturating_sub(bottom_total_height);
+        let transcript_area = Rect::new(area.x, area.y, area.width, transcript_height);
+        let bottom_gap = bottom_total_height.saturating_sub(desired_bottom_height);
+        let bottom_area = Rect::new(
+            area.x,
+            area.y
+                .saturating_add(transcript_height)
+                .saturating_add(bottom_gap),
+            area.width,
+            bottom_total_height.saturating_sub(bottom_gap),
+        );
+
+        if !transcript_area.is_empty() {
+            SessionTranscriptRenderable::new(transcript_cells, self.active_cell.as_deref())
+                .render(transcript_area, buf);
+        }
+        if !bottom_area.is_empty() {
+            self.bottom_pane.render(bottom_area, buf);
+        }
+        self.last_rendered_width.set(Some(area.width as usize));
+    }
+
+    pub(crate) fn cursor_pos_session_pane(&self, area: Rect) -> Option<(u16, u16)> {
+        let desired_bottom_height = self.bottom_pane.desired_height(area.width);
+        let bottom_total_height = desired_bottom_height.saturating_add(1).min(area.height);
+        let transcript_height = area.height.saturating_sub(bottom_total_height);
+        let bottom_gap = bottom_total_height.saturating_sub(desired_bottom_height);
+        let bottom_area = Rect::new(
+            area.x,
+            area.y
+                .saturating_add(transcript_height)
+                .saturating_add(bottom_gap),
+            area.width,
+            bottom_total_height.saturating_sub(bottom_gap),
+        );
+        self.bottom_pane.cursor_pos(bottom_area)
+    }
 }
 
 fn has_websocket_timing_metrics(summary: RuntimeMetricsSummary) -> bool {
@@ -9031,16 +9206,16 @@ impl Drop for ChatWidget {
 
 impl Renderable for ChatWidget {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        self.as_renderable().render(area, buf);
+        self.as_renderable(true).render(area, buf);
         self.last_rendered_width.set(Some(area.width as usize));
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        self.as_renderable().desired_height(width)
+        self.as_renderable(false).desired_height(width)
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        self.as_renderable().cursor_pos(area)
+        self.as_renderable(true).cursor_pos(area)
     }
 }
 

@@ -1,0 +1,38 @@
+---
+source: tui/src/bottom_pane/project_chooser.rs
+expression: "render_snapshot(&view, 80)"
+---
+Open Project In New Horizontal Pane                                             
+Choose a favorite, or browse into a directory and press Enter.                  
+/workspace                                                                      
+╔Favorites═══════════════════════╗┌Browser: /workspace─────────────────────────┐
+║> ● codex                       ║│  .. /                                      │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+║                                ║│                                            │
+╚════════════════════════════════╝└────────────────────────────────────────────┘
+enter to open project                                                           
+x to browse directory | esc to cancel

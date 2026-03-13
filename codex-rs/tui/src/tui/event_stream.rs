@@ -49,8 +49,7 @@ const GAMEPAD_REPEAT_DELAY: Duration = Duration::from_millis(250);
 const GAMEPAD_MIN_REPEAT_INTERVAL: Duration = Duration::from_millis(60);
 const GAMEPAD_MAX_REPEAT_INTERVAL: Duration = Duration::from_millis(180);
 const STICK_DEADZONE: f32 = 0.45;
-const TRIGGER_DEADZONE: f32 = 0.55;
-const SHOULDER_NEW_TAB_HOLD_DURATION: Duration = Duration::from_secs(4);
+const SHOULDER_NEW_TAB_HOLD_DURATION: Duration = Duration::from_secs(2);
 
 /// Result type produced by an event source.
 pub type EventResult = std::io::Result<Event>;
@@ -400,7 +399,6 @@ fn run_gamepad_event_loop(tx: mpsc::UnboundedSender<TuiEvent>) {
 struct GamepadState {
     left_x: f32,
     left_y: f32,
-    right_trigger_axis: f32,
     dpad_up: bool,
     dpad_down: bool,
     dpad_left: bool,
@@ -409,12 +407,14 @@ struct GamepadState {
     right_shoulder_pressed_at: Option<Instant>,
     left_new_tab_fired: bool,
     right_new_tab_fired: bool,
-    focus_next_button: bool,
+    left_pane_pressed_at: Option<Instant>,
+    right_pane_pressed_at: Option<Instant>,
+    left_split_fired: bool,
+    right_split_fired: bool,
     repeat_up: RepeatState,
     repeat_down: RepeatState,
     repeat_left: RepeatState,
     repeat_right: RepeatState,
-    repeat_focus_next: RepeatState,
 }
 
 #[derive(Default)]
@@ -485,8 +485,24 @@ impl GamepadState {
                     GamepadAction::ProjectTabNext,
                 );
             }
-            Button::LeftTrigger2 => {}
-            Button::RightTrigger2 => self.focus_next_button = pressed,
+            Button::LeftTrigger2 => {
+                Self::handle_shoulder_button(
+                    pressed,
+                    &mut self.left_pane_pressed_at,
+                    &mut self.left_split_fired,
+                    tx,
+                    GamepadAction::SplitPaneFocusPrevious,
+                );
+            }
+            Button::RightTrigger2 => {
+                Self::handle_shoulder_button(
+                    pressed,
+                    &mut self.right_pane_pressed_at,
+                    &mut self.right_split_fired,
+                    tx,
+                    GamepadAction::SplitPaneFocusNext,
+                );
+            }
             Button::Start | Button::Mode if pressed => {
                 let _ = tx.send(TuiEvent::Gamepad(GamepadAction::OpenProjectNavigator));
             }
@@ -542,7 +558,6 @@ impl GamepadState {
         match axis {
             Axis::LeftStickX => self.left_x = value,
             Axis::LeftStickY => self.left_y = value,
-            Axis::RightZ => self.right_trigger_axis = normalize_trigger(value),
             _ => {}
         }
     }
@@ -563,14 +578,25 @@ impl GamepadState {
             GamepadAction::ProjectNewTabRight,
             now,
         );
+        Self::emit_shoulder_hold_action(
+            &mut self.left_pane_pressed_at,
+            &mut self.left_split_fired,
+            tx,
+            GamepadAction::SplitPaneCreateHorizontal,
+            now,
+        );
+        Self::emit_shoulder_hold_action(
+            &mut self.right_pane_pressed_at,
+            &mut self.right_split_fired,
+            tx,
+            GamepadAction::SplitPaneCreateVertical,
+            now,
+        );
 
         let left_strength = axis_strength(self.left_x, false);
         let right_strength = axis_strength(self.left_x, true);
         let up_strength = axis_strength(-self.left_y, true);
         let down_strength = axis_strength(self.left_y, true);
-        let focus_next_strength =
-            self.right_trigger_axis
-                .max(if self.focus_next_button { 1.0 } else { 0.0 });
 
         self.repeat_up.tick(
             self.dpad_up || up_strength > 0.0,
@@ -600,13 +626,6 @@ impl GamepadState {
             TuiEvent::Gamepad(GamepadAction::Right),
             now,
         );
-        self.repeat_focus_next.tick(
-            focus_next_strength > TRIGGER_DEADZONE,
-            focus_next_strength,
-            tx,
-            TuiEvent::Gamepad(GamepadAction::FocusNext),
-            now,
-        );
     }
 
     fn emit_shoulder_hold_action(
@@ -626,10 +645,6 @@ impl GamepadState {
             *new_tab_fired = true;
         }
     }
-}
-
-fn normalize_trigger(value: f32) -> f32 {
-    ((value + 1.0) / 2.0).clamp(0.0, 1.0)
 }
 
 fn axis_strength(value: f32, positive_direction: bool) -> f32 {
@@ -810,17 +825,20 @@ mod tests {
     }
 
     #[test]
-    fn left_trigger_2_is_unmapped() {
+    fn trigger_2_tap_switches_split_focus_on_release() {
         let mut state = GamepadState::default();
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         state.set_button(Button::LeftTrigger2, true, &tx);
-        state.set_axis(Axis::LeftZ, 1.0);
-        state.emit_repeats(&tx);
-
         assert!(matches!(
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        state.set_button(Button::LeftTrigger2, false, &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TuiEvent::Gamepad(GamepadAction::SplitPaneFocusPrevious))
         ));
     }
 
@@ -861,6 +879,31 @@ mod tests {
         ));
 
         state.set_button(Button::LeftTrigger, false, &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn trigger_2_hold_creates_split_once() {
+        let mut state = GamepadState::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        state.right_pane_pressed_at = Some(Instant::now() - SHOULDER_NEW_TAB_HOLD_DURATION);
+        state.emit_repeats(&tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TuiEvent::Gamepad(GamepadAction::SplitPaneCreateVertical))
+        ));
+
+        state.emit_repeats(&tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        state.set_button(Button::RightTrigger2, false, &tx);
         assert!(matches!(
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)

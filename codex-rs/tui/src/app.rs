@@ -1,8 +1,11 @@
 use crate::app_backtrack::BacktrackState;
 use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
+use crate::app_event::ProjectOpenTarget;
 use crate::app_event::ProjectTabPlacement;
 use crate::app_event::RealtimeAudioDeviceKind;
+use crate::app_event::SplitAxis;
+use crate::app_event::SplitPaneTarget;
 #[cfg(target_os = "windows")]
 use crate::app_event::WindowsSandboxEnableMode;
 use crate::app_event_sender::AppEventSender;
@@ -130,6 +133,7 @@ use toml::Value as TomlValue;
 mod agent_navigation;
 mod pending_interactive_replay;
 mod project_navigation;
+mod split_pane;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
@@ -141,6 +145,8 @@ pub(crate) use self::project_navigation::ProjectNavigationState;
 use self::project_navigation::ProjectTabDirection;
 use self::project_navigation::ProjectWorkspaceDirection;
 pub(crate) use self::project_navigation::RestoredWorkspace;
+use self::split_pane::PaneId;
+use self::split_pane::SplitPaneState;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
@@ -360,6 +366,55 @@ struct ThreadEventSnapshot {
     session_configured: Option<Event>,
     events: Vec<Event>,
     input_state: Option<ThreadInputState>,
+}
+
+struct SplitPanePreview {
+    thread_id: ThreadId,
+    transcript_cells: Vec<Arc<dyn HistoryCell>>,
+    widget: ChatWidget,
+    dirty: bool,
+}
+
+fn collect_replayed_transcript_cells(
+    app_event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) -> Vec<Arc<dyn HistoryCell>> {
+    let mut transcript_cells = Vec::new();
+    while let Ok(event) = app_event_rx.try_recv() {
+        match event {
+            AppEvent::InsertHistoryCell(cell) => transcript_cells.push(cell.into()),
+            AppEvent::ApplyThreadRollback { num_turns } => {
+                crate::app_backtrack::trim_transcript_cells_drop_last_n_user_turns(
+                    &mut transcript_cells,
+                    num_turns,
+                );
+            }
+            _ => {}
+        }
+    }
+    transcript_cells
+}
+
+fn replay_thread_snapshot_into_chat_widget(
+    chat_widget: &mut ChatWidget,
+    snapshot: ThreadEventSnapshot,
+    resume_restored_queue: bool,
+    app_event_rx: Option<&mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
+) -> Vec<Arc<dyn HistoryCell>> {
+    if let Some(event) = snapshot.session_configured {
+        chat_widget.handle_codex_event_replay(event);
+    }
+    chat_widget.set_queue_autosend_suppressed(true);
+    chat_widget.restore_thread_input_state(snapshot.input_state);
+    for event in snapshot.events {
+        chat_widget.handle_codex_event_replay(event);
+    }
+    chat_widget.set_queue_autosend_suppressed(false);
+    if resume_restored_queue {
+        chat_widget.maybe_send_next_queued_input();
+    }
+    app_event_rx
+        .map(collect_replayed_transcript_cells)
+        .unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -807,6 +862,8 @@ pub(crate) struct App {
     project_navigation: ProjectNavigationState,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<Event>>,
+    split_pane: Option<SplitPaneState<ThreadId>>,
+    split_pane_previews: HashMap<PaneId, SplitPanePreview>,
     primary_thread_id: Option<ThreadId>,
     primary_session_configured: Option<SessionConfiguredEvent>,
     pending_primary_events: VecDeque<Event>,
@@ -1082,6 +1139,7 @@ impl App {
         self.has_emitted_history_lines = false;
         self.backtrack = BacktrackState::default();
         self.backtrack_render_pending = false;
+        self.clear_split_pane();
     }
 
     async fn shutdown_current_thread(&mut self) {
@@ -1230,6 +1288,141 @@ impl App {
         self.active_thread_id.or(self.chat_widget.thread_id())
     }
 
+    fn clear_split_pane(&mut self) {
+        self.split_pane = None;
+        self.split_pane_previews.clear();
+    }
+
+    fn set_split_preview_dirty(&mut self, thread_id: ThreadId) {
+        for preview in self.split_pane_previews.values_mut() {
+            if preview.thread_id == thread_id {
+                preview.dirty = true;
+            }
+        }
+    }
+
+    fn sync_split_pane_active_thread(&mut self, thread_id: ThreadId) {
+        let Some(split_pane) = &mut self.split_pane else {
+            return;
+        };
+        split_pane.set_active_thread(thread_id);
+        let active_pane_id = split_pane.active_pane_id();
+        self.split_pane_previews
+            .retain(|pane_id, _| *pane_id != active_pane_id);
+    }
+
+    fn open_split_pane_project_chooser(
+        &mut self,
+        terminal_area: ratatui::layout::Size,
+        axis: SplitAxis,
+    ) {
+        let Some(split_pane) = self
+            .split_pane
+            .clone()
+            .or_else(|| self.current_displayed_thread_id().map(SplitPaneState::new))
+        else {
+            return;
+        };
+        let root_area = ratatui::layout::Rect::new(0, 0, terminal_area.width, terminal_area.height);
+        if !split_pane.can_split_active(root_area, axis) {
+            self.chat_widget.add_info_message(
+                "That pane is too small to split at the current window size.".to_string(),
+                None,
+            );
+            return;
+        }
+        self.open_project_chooser(ProjectOpenTarget::SplitPane(SplitPaneTarget {
+            pane_id: split_pane.active_pane_id(),
+            axis,
+        }));
+    }
+
+    async fn focus_split_pane(&mut self, tui: &mut tui::Tui, next: bool) -> Result<()> {
+        let Some(mut split_pane) = self.split_pane.take() else {
+            return Ok(());
+        };
+        let target_thread_id = if next {
+            split_pane.focus_next()
+        } else {
+            split_pane.focus_previous()
+        };
+        let Some(target_thread_id) = target_thread_id else {
+            return Ok(());
+        };
+        self.split_pane = Some(split_pane);
+        if self.active_thread_id == Some(target_thread_id) {
+            self.sync_project_tabs_chrome();
+            let active_pane_id = self
+                .split_pane
+                .as_ref()
+                .map(SplitPaneState::active_pane_id)
+                .expect("split pane should exist");
+            self.split_pane_previews
+                .retain(|pane_id, _| *pane_id != active_pane_id);
+            return Ok(());
+        }
+        self.select_agent_thread(tui, target_thread_id).await
+    }
+
+    async fn refresh_split_pane_previews(&mut self, tui: &mut tui::Tui) {
+        let Some(split_pane) = self.split_pane.as_ref() else {
+            self.split_pane_previews.clear();
+            return;
+        };
+
+        let inactive_leaves = split_pane.inactive_leaves();
+        let inactive_pane_ids: HashSet<PaneId> = inactive_leaves
+            .iter()
+            .map(|(pane_id, _)| *pane_id)
+            .collect();
+        self.split_pane_previews
+            .retain(|pane_id, _| inactive_pane_ids.contains(pane_id));
+
+        for (pane_id, thread_id) in inactive_leaves {
+            if self
+                .split_pane_previews
+                .get(&pane_id)
+                .is_some_and(|preview| preview.thread_id == thread_id && !preview.dirty)
+            {
+                continue;
+            }
+            let Some(snapshot) = self.thread_snapshot(thread_id).await else {
+                self.split_pane_previews.remove(&pane_id);
+                continue;
+            };
+            let mut init =
+                self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
+            let (preview_app_tx, mut preview_app_rx) = unbounded_channel();
+            init.app_event_tx = AppEventSender::new(preview_app_tx);
+            let (tx, _rx) = unbounded_channel();
+            let mut widget = ChatWidget::new_with_op_sender(init, tx);
+            widget.set_input_focus(false);
+            widget.set_pending_thread_approvals(Vec::new());
+            widget.set_active_agent_label(None);
+            let transcript_cells = replay_thread_snapshot_into_chat_widget(
+                &mut widget,
+                snapshot,
+                false,
+                Some(&mut preview_app_rx),
+            );
+            self.split_pane_previews.insert(
+                pane_id,
+                SplitPanePreview {
+                    thread_id,
+                    transcript_cells,
+                    widget,
+                    dirty: false,
+                },
+            );
+        }
+    }
+
+    async fn thread_snapshot(&self, thread_id: ThreadId) -> Option<ThreadEventSnapshot> {
+        let channel = self.thread_event_channels.get(&thread_id)?;
+        let store = channel.store.lock().await;
+        Some(store.snapshot())
+    }
+
     /// Mirrors the visible thread into the contextual footer row.
     ///
     /// The footer sometimes shows ambient context instead of an instructional hint. In multi-agent
@@ -1339,6 +1532,7 @@ impl App {
         if refresh_pending_thread_approvals {
             self.refresh_pending_thread_approvals().await;
         }
+        self.set_split_preview_dirty(thread_id);
         self.sync_project_tabs_chrome();
         Ok(())
     }
@@ -1625,7 +1819,7 @@ impl App {
             )));
     }
 
-    fn open_project_chooser(&mut self, placement: ProjectTabPlacement) {
+    fn open_project_chooser(&mut self, target: ProjectOpenTarget) {
         let initial_root =
             preferred_projects_root().or_else(|| Some(self.chat_widget.config_ref().cwd.clone()));
         self.chat_widget
@@ -1634,7 +1828,7 @@ impl App {
                 self.build_favorite_tiles(),
                 self.project_navigation.recents().to_vec(),
                 initial_root,
-                placement,
+                target,
             )));
     }
 
@@ -1807,6 +2001,24 @@ impl App {
             .await
     }
 
+    async fn focus_or_open_project_at_target(
+        &mut self,
+        tui: &mut tui::Tui,
+        cwd: PathBuf,
+        target: ProjectOpenTarget,
+    ) -> Result<()> {
+        match target {
+            ProjectOpenTarget::Tab(placement) => {
+                self.focus_or_open_project_with_placement(tui, cwd, placement)
+                    .await
+            }
+            ProjectOpenTarget::SplitPane(target) => {
+                self.focus_or_open_project_in_split_pane(tui, cwd, target)
+                    .await
+            }
+        }
+    }
+
     async fn focus_or_open_project_with_placement(
         &mut self,
         tui: &mut tui::Tui,
@@ -1822,16 +2034,97 @@ impl App {
             return Ok(());
         }
 
-        self.open_project_in_new_tab(tui, cwd, new_tab_placement(placement))
-            .await
+        let anchor_thread_id = self.current_displayed_thread_id();
+        let Some(thread_id) = self
+            .spawn_project_thread(cwd, new_tab_placement(placement), anchor_thread_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        self.select_agent_thread(tui, thread_id).await?;
+        self.refresh_in_memory_config_from_disk_best_effort("opening a project tab")
+            .await;
+        self.file_search
+            .update_search_dir(self.chat_widget.config_ref().cwd.clone());
+        Ok(())
     }
 
-    async fn open_project_in_new_tab(
+    fn bind_split_pane_thread(
+        &mut self,
+        current_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        target: SplitPaneTarget,
+    ) {
+        let mut split_pane = self
+            .split_pane
+            .take()
+            .unwrap_or_else(|| SplitPaneState::new(current_thread_id));
+
+        if let Some(existing_pane_id) = split_pane.pane_for_thread(target_thread_id) {
+            split_pane.focus_pane(existing_pane_id);
+        } else if split_pane.focus_pane(target.pane_id).is_some() {
+            split_pane.split_active(target_thread_id, target.axis);
+        } else {
+            split_pane = SplitPaneState::new(current_thread_id);
+            split_pane.split_active(target_thread_id, target.axis);
+        }
+
+        self.split_pane = (split_pane.leaf_count() > 1).then_some(split_pane);
+        self.split_pane_previews.clear();
+    }
+
+    async fn focus_or_open_project_in_split_pane(
         &mut self,
         tui: &mut tui::Tui,
         cwd: PathBuf,
-        placement: NewTabPlacement,
+        target: SplitPaneTarget,
     ) -> Result<()> {
+        let Some(current_thread_id) = self.current_displayed_thread_id() else {
+            return Ok(());
+        };
+
+        let target_thread_id =
+            if let Some((_, thread_id)) = self.project_navigation.find_thread_for_cwd(&cwd) {
+                thread_id
+            } else {
+                let Some(thread_id) = self
+                    .spawn_project_thread(cwd, NewTabPlacement::Right, Some(current_thread_id))
+                    .await?
+                else {
+                    return Ok(());
+                };
+                thread_id
+            };
+
+        if current_thread_id == target_thread_id
+            && self
+                .split_pane
+                .as_ref()
+                .map(|split_pane| split_pane.active_pane_id() == target.pane_id)
+                .unwrap_or(true)
+        {
+            self.chat_widget.add_info_message(
+                "That project is already open in the current pane.".to_string(),
+                None,
+            );
+            return Ok(());
+        }
+
+        self.bind_split_pane_thread(current_thread_id, target_thread_id, target);
+        self.select_agent_thread(tui, target_thread_id).await?;
+        self.refresh_in_memory_config_from_disk_best_effort("opening a split pane")
+            .await;
+        self.file_search
+            .update_search_dir(self.chat_widget.config_ref().cwd.clone());
+        Ok(())
+    }
+
+    async fn spawn_project_thread(
+        &mut self,
+        cwd: PathBuf,
+        placement: NewTabPlacement,
+        anchor_thread_id: Option<ThreadId>,
+    ) -> Result<Option<ThreadId>> {
         let mut config = self.rebuild_config_for_cwd(cwd.clone()).await?;
         self.apply_runtime_policy_overrides(&mut config);
         config.model = Some(self.chat_widget.current_model().to_string());
@@ -1846,11 +2139,10 @@ impl App {
                 self.chat_widget.add_error_message(format!(
                     "Failed to open project tab for {cwd_display}: {err}"
                 ));
-                return Ok(());
+                return Ok(None);
             }
         };
 
-        let anchor_thread_id = self.current_displayed_thread_id();
         self.handle_thread_created(new_thread.thread_id).await?;
         self.project_navigation.insert_project_thread(
             new_thread.thread_id,
@@ -1860,13 +2152,8 @@ impl App {
         );
         self.project_navigation.record_recent(cwd);
         self.persist_project_navigation_state("opening a project tab");
-        self.select_agent_thread(tui, new_thread.thread_id).await?;
         self.sync_project_tabs_chrome();
-        self.refresh_in_memory_config_from_disk_best_effort("opening a project tab")
-            .await;
-        self.file_search
-            .update_search_dir(self.chat_widget.config_ref().cwd.clone());
-        Ok(())
+        Ok(Some(new_thread.thread_id))
     }
 
     fn toggle_project_favorite(&mut self, cwd: PathBuf) {
@@ -1946,7 +2233,7 @@ impl App {
     }
 
     async fn close_project_tab(&mut self, tui: &mut tui::Tui, thread_id: ThreadId) -> Result<()> {
-        let Some(next_thread_id) = self
+        let Some(adjacent_thread_id) = self
             .project_navigation
             .adjacent_tab(Some(thread_id), ProjectTabDirection::Next)
         else {
@@ -1959,17 +2246,43 @@ impl App {
             .tab_cwd(thread_id)
             .map(Path::to_path_buf);
 
-        if self.chat_widget.thread_id() == Some(thread_id) {
+        let is_active_tab = self.chat_widget.thread_id() == Some(thread_id);
+        if is_active_tab {
             self.backtrack.pending_rollback = None;
-            self.suppress_shutdown_complete = true;
-            self.chat_widget.submit_op(Op::Shutdown);
+            self.active_thread_id = None;
+            self.active_thread_rx = None;
         }
-        self.server.remove_thread(&thread_id).await;
+        let removed_thread = self.server.remove_thread(&thread_id).await;
         self.abort_thread_event_listener(thread_id);
+        self.thread_event_channels.remove(&thread_id);
         self.project_navigation.remove_thread(thread_id);
+        if let Some(split_pane) = self.split_pane.take()
+            && let Some(split_pane) = split_pane.without_thread(thread_id)
+            && split_pane.leaf_count() > 1
+        {
+            self.split_pane = Some(split_pane);
+        }
+        self.split_pane_previews.clear();
         self.persist_project_navigation_state("closing a project tab");
         self.mark_agent_picker_thread_closed(thread_id);
-        self.select_agent_thread(tui, next_thread_id).await?;
+        let next_thread_id = self
+            .split_pane
+            .as_ref()
+            .map(SplitPaneState::active_thread)
+            .unwrap_or(adjacent_thread_id);
+        if is_active_tab {
+            self.select_agent_thread(tui, next_thread_id).await?;
+        } else {
+            self.sync_project_tabs_chrome();
+        }
+
+        if let Some(thread) = removed_thread {
+            tokio::spawn(async move {
+                if let Err(err) = thread.submit(Op::Shutdown).await {
+                    tracing::debug!(error = %err, closed_thread_id = %thread_id, "failed to shutdown closed project tab");
+                }
+            });
+        }
         self.sync_project_tabs_chrome();
 
         let closed_label = closed_cwd
@@ -2110,6 +2423,7 @@ impl App {
         self.drain_active_thread_events(tui).await?;
         self.refresh_pending_thread_approvals().await;
         self.project_navigation.set_active_thread(thread_id);
+        self.sync_split_pane_active_thread(thread_id);
         if let Some(cwd) = self.project_navigation.tab_cwd(thread_id) {
             self.project_navigation.record_recent(cwd.to_path_buf());
             self.persist_project_navigation_state("switching project tabs");
@@ -2139,6 +2453,7 @@ impl App {
         self.project_navigation = ProjectNavigationState::load(&self.config.codex_home);
         self.active_thread_id = None;
         self.active_thread_rx = None;
+        self.clear_split_pane();
         self.primary_thread_id = None;
         self.pending_primary_events.clear();
         self.chat_widget.set_pending_thread_approvals(Vec::new());
@@ -2332,19 +2647,12 @@ impl App {
         snapshot: ThreadEventSnapshot,
         resume_restored_queue: bool,
     ) {
-        if let Some(event) = snapshot.session_configured {
-            self.handle_codex_event_replay(event);
-        }
-        self.chat_widget.set_queue_autosend_suppressed(true);
-        self.chat_widget
-            .restore_thread_input_state(snapshot.input_state);
-        for event in snapshot.events {
-            self.handle_codex_event_replay(event);
-        }
-        self.chat_widget.set_queue_autosend_suppressed(false);
-        if resume_restored_queue {
-            self.chat_widget.maybe_send_next_queued_input();
-        }
+        replay_thread_snapshot_into_chat_widget(
+            &mut self.chat_widget,
+            snapshot,
+            resume_restored_queue,
+            None,
+        );
         self.refresh_status_line();
     }
 
@@ -2649,6 +2957,8 @@ impl App {
             project_navigation,
             active_thread_id: None,
             active_thread_rx: None,
+            split_pane: None,
+            split_pane_previews: HashMap::new(),
             primary_thread_id: None,
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
@@ -2833,19 +3143,57 @@ impl App {
                     }
                     // Allow widgets to process any pending timers before rendering.
                     self.chat_widget.pre_draw_tick();
+                    self.refresh_split_pane_previews(tui).await;
                     tui.set_top_bar_line(
                         self.chat_widget
                             .project_tabs_line(tui.terminal.size()?.width),
                     );
-                    tui.draw(
-                        self.chat_widget.desired_height(tui.terminal.size()?.width),
-                        |frame| {
+                    let terminal_width = tui.terminal.size()?.width;
+                    let desired_height = if self.split_pane.is_some() {
+                        SplitPaneState::<ThreadId>::desired_height()
+                    } else {
+                        self.chat_widget.desired_height(terminal_width)
+                    };
+                    tui.draw(desired_height, |frame| {
+                        if let Some(split_pane) = self.split_pane.as_ref() {
+                            let active_pane_id = split_pane.active_pane_id();
+                            let active_thread_id = self.chat_widget.thread_id();
+                            split_pane.visit_leaf_areas(
+                                frame.area(),
+                                &mut |pane_id, thread_id, area| {
+                                    if Some(thread_id) == active_thread_id
+                                        && pane_id == active_pane_id
+                                    {
+                                        self.chat_widget.render_session_pane(
+                                            area,
+                                            frame.buffer,
+                                            &self.transcript_cells,
+                                        );
+                                    } else if let Some(preview) =
+                                        self.split_pane_previews.get(&pane_id)
+                                    {
+                                        preview.widget.render_session_pane(
+                                            area,
+                                            frame.buffer,
+                                            &preview.transcript_cells,
+                                        );
+                                    }
+                                },
+                            );
+                            split_pane.render_dividers(frame.area(), frame.buffer);
+                            if let Some((x, y)) = split_pane
+                                .active_pane_area(frame.area())
+                                .and_then(|area| self.chat_widget.cursor_pos_session_pane(area))
+                            {
+                                frame.set_cursor_position((x, y));
+                            }
+                        } else {
                             self.chat_widget.render(frame.area(), frame.buffer);
                             if let Some((x, y)) = self.chat_widget.cursor_pos(frame.area()) {
                                 frame.set_cursor_position((x, y));
                             }
-                        },
-                    )?;
+                        }
+                    })?;
                     if self.chat_widget.external_editor_state() == ExternalEditorState::Requested {
                         self.chat_widget
                             .set_external_editor_state(ExternalEditorState::Active);
@@ -3056,7 +3404,9 @@ impl App {
                             self.has_emitted_history_lines = true;
                         }
                     }
-                    if self.overlay.is_some() {
+                    if self.split_pane.is_some() {
+                        tui.frame_requester().schedule_frame();
+                    } else if self.overlay.is_some() {
                         self.deferred_history_lines.extend(display);
                     } else {
                         tui.insert_history_lines(display);
@@ -3899,8 +4249,8 @@ impl App {
                 self.focus_or_open_project(tui, cwd).await?;
                 self.sync_project_tabs_chrome();
             }
-            AppEvent::FocusOrOpenProjectWithPlacement { cwd, placement } => {
-                self.focus_or_open_project_with_placement(tui, cwd, placement)
+            AppEvent::FocusOrOpenProjectAtTarget { cwd, target } => {
+                self.focus_or_open_project_at_target(tui, cwd, target)
                     .await?;
                 self.sync_project_tabs_chrome();
             }
@@ -4688,13 +5038,43 @@ impl App {
             }
             GamepadAction::ProjectNewTabLeft => {
                 if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
-                    self.open_project_chooser(ProjectTabPlacement::Left);
+                    self.open_project_chooser(ProjectOpenTarget::Tab(ProjectTabPlacement::Left));
                 }
                 None
             }
             GamepadAction::ProjectNewTabRight => {
                 if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
-                    self.open_project_chooser(ProjectTabPlacement::Right);
+                    self.open_project_chooser(ProjectOpenTarget::Tab(ProjectTabPlacement::Right));
+                }
+                None
+            }
+            GamepadAction::SplitPaneFocusPrevious => {
+                if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
+                    let _ = self.focus_split_pane(tui, false).await;
+                }
+                None
+            }
+            GamepadAction::SplitPaneFocusNext => {
+                if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
+                    let _ = self.focus_split_pane(tui, true).await;
+                }
+                None
+            }
+            GamepadAction::SplitPaneCreateHorizontal => {
+                if self.overlay.is_none()
+                    && self.chat_widget.no_modal_or_popup_active()
+                    && let Ok(size) = tui.terminal.size()
+                {
+                    self.open_split_pane_project_chooser(size, SplitAxis::Horizontal);
+                }
+                None
+            }
+            GamepadAction::SplitPaneCreateVertical => {
+                if self.overlay.is_none()
+                    && self.chat_widget.no_modal_or_popup_active()
+                    && let Ok(size) = tui.terminal.size()
+                {
+                    self.open_split_pane_project_chooser(size, SplitAxis::Vertical);
                 }
                 None
             }
@@ -6878,6 +7258,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_split_pane_thread_uses_requested_split_target_as_session_target() -> Result<()> {
+        let mut app = make_test_app().await;
+        let current_thread_id = app
+            .spawn_project_thread(
+                PathBuf::from("/workspace/codex"),
+                NewTabPlacement::Right,
+                None,
+            )
+            .await?
+            .expect("current thread");
+        let next_thread_id = app
+            .spawn_project_thread(
+                PathBuf::from("/workspace/dragonfly"),
+                NewTabPlacement::Right,
+                Some(current_thread_id),
+            )
+            .await?
+            .expect("next thread");
+
+        app.bind_split_pane_thread(
+            current_thread_id,
+            next_thread_id,
+            SplitPaneTarget {
+                pane_id: 0,
+                axis: SplitAxis::Vertical,
+            },
+        );
+
+        let split_pane = app.split_pane.expect("split pane should exist");
+        assert_eq!(split_pane.leaf_count(), 2);
+        assert_eq!(split_pane.active_thread(), next_thread_id);
+        assert_eq!(
+            split_pane.leaves(),
+            vec![(0, current_thread_id), (1, next_thread_id)]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn project_directory_browser_popup_snapshot() -> Result<()> {
         let root = tempdir()?;
         let root_path = root.path().join("projects");
@@ -7010,6 +7429,8 @@ mod tests {
             project_navigation: ProjectNavigationState::default(),
             active_thread_id: None,
             active_thread_rx: None,
+            split_pane: None,
+            split_pane_previews: HashMap::new(),
             primary_thread_id: None,
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
@@ -7075,6 +7496,8 @@ mod tests {
                 project_navigation: ProjectNavigationState::default(),
                 active_thread_id: None,
                 active_thread_rx: None,
+                split_pane: None,
+                split_pane_previews: HashMap::new(),
                 primary_thread_id: None,
                 primary_session_configured: None,
                 pending_primary_events: VecDeque::new(),
