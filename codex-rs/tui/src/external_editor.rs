@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process::Stdio;
 
 use color_eyre::eyre::Report;
@@ -52,13 +53,49 @@ pub(crate) fn resolve_editor_command() -> std::result::Result<Vec<String>, Edito
 
 /// Write `seed` to a temp file, launch the editor command, and return the updated content.
 pub(crate) async fn run_editor(seed: &str, editor_cmd: &[String]) -> Result<String> {
-    if editor_cmd.is_empty() {
-        return Err(Report::msg("editor command is empty"));
-    }
-
     // Convert to TempPath immediately so no file handle stays open on Windows.
     let temp_path = Builder::new().suffix(".md").tempfile()?.into_temp_path();
     fs::write(&temp_path, seed)?;
+
+    let mut cmd = new_editor_command(editor_cmd)?;
+    let status = cmd
+        .arg(&temp_path)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await?;
+
+    if !status.success() {
+        return Err(Report::msg(format!("editor exited with status {status}")));
+    }
+
+    let contents = fs::read_to_string(&temp_path)?;
+    Ok(contents)
+}
+
+/// Launch the editor against an existing path and wait for it to exit successfully.
+pub(crate) async fn run_editor_for_path(path: &Path, editor_cmd: &[String]) -> Result<()> {
+    let mut cmd = new_editor_command(editor_cmd)?;
+    let status = cmd
+        .arg(path)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await?;
+
+    if !status.success() {
+        return Err(Report::msg(format!("editor exited with status {status}")));
+    }
+
+    Ok(())
+}
+
+fn new_editor_command(editor_cmd: &[String]) -> Result<Command> {
+    if editor_cmd.is_empty() {
+        return Err(Report::msg("editor command is empty"));
+    }
 
     let mut cmd = {
         #[cfg(windows)]
@@ -74,20 +111,7 @@ pub(crate) async fn run_editor(seed: &str, editor_cmd: &[String]) -> Result<Stri
     if editor_cmd.len() > 1 {
         cmd.args(&editor_cmd[1..]);
     }
-    let status = cmd
-        .arg(&temp_path)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await?;
-
-    if !status.success() {
-        return Err(Report::msg(format!("editor exited with status {status}")));
-    }
-
-    let contents = fs::read_to_string(&temp_path)?;
-    Ok(contents)
+    Ok(cmd)
 }
 
 #[cfg(test)]
@@ -167,5 +191,26 @@ mod tests {
         let cmd = vec![script_path.to_string_lossy().to_string()];
         let result = run_editor("seed", &cmd).await.unwrap();
         assert_eq!(result, "edited".to_string());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn run_editor_for_path_updates_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let script_path = dir.path().join("edit.sh");
+        fs::write(&script_path, "#!/bin/sh\nprintf \"favorite\" > \"$1\"\n").unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let target_path = dir.path().join("favorites.json");
+        fs::write(&target_path, "seed").unwrap();
+
+        let cmd = vec![script_path.to_string_lossy().to_string()];
+        run_editor_for_path(&target_path, &cmd).await.unwrap();
+
+        assert_eq!(fs::read_to_string(&target_path).unwrap(), "favorite");
     }
 }
