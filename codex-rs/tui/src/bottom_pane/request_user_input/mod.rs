@@ -225,8 +225,13 @@ impl RequestUserInputOverlay {
     }
 
     fn selected_option_index(&self) -> Option<usize> {
-        self.current_answer()
-            .and_then(|answer| answer.selected_indices.first().copied())
+        self.current_answer().and_then(|answer| {
+            answer.selected_indices.first().copied().or_else(|| {
+                (!self.current_question_allows_multiple())
+                    .then_some(answer.options_state.selected_idx)
+                    .flatten()
+            })
+        })
     }
 
     fn focused_option_index(&self) -> Option<usize> {
@@ -235,8 +240,7 @@ impl RequestUserInputOverlay {
     }
 
     fn has_selected_option(&self) -> bool {
-        self.current_answer()
-            .is_some_and(|answer| !answer.selected_indices.is_empty())
+        self.selected_option_index().is_some()
     }
 
     fn current_question_allows_multiple(&self) -> bool {
@@ -319,7 +323,13 @@ impl RequestUserInputOverlay {
             .map(|(question, options)| {
                 let selected_idx = self
                     .current_answer()
-                    .map(|answer| answer.selected_indices.clone())
+                    .map(|answer| {
+                        if question.allow_multiple {
+                            answer.selected_indices.clone()
+                        } else {
+                            self.selected_option_index().into_iter().collect()
+                        }
+                    })
                     .unwrap_or_default();
                 let mut rows = options
                     .iter()
@@ -777,7 +787,7 @@ impl RequestUserInputOverlay {
         }
         if let Some(answer) = self.current_answer_mut() {
             answer.selected_indices.clear();
-            answer.options_state.selected_idx = Some(0);
+            answer.options_state.selected_idx = None;
             answer.draft = ComposerDraft::default();
             answer.answer_committed = false;
             answer.notes_visible = false;
@@ -808,7 +818,14 @@ impl RequestUserInputOverlay {
 
     /// Ensure there is a selection before allowing notes entry.
     fn ensure_selected_for_notes(&mut self) {
-        if !self.has_selected_option() {
+        if self.current_question_allows_multiple() {
+            if !self.has_selected_option() {
+                self.select_current_option(false);
+            }
+        } else if self
+            .current_answer()
+            .is_some_and(|answer| answer.selected_indices.is_empty())
+        {
             self.select_current_option(false);
         }
         if let Some(answer) = self.current_answer_mut() {
@@ -843,7 +860,17 @@ impl RequestUserInputOverlay {
                 && (answer_state.answer_committed
                     || (question.allow_multiple && !answer_state.selected_indices.is_empty()))
             {
-                answer_state.selected_indices.clone()
+                if question.allow_multiple {
+                    answer_state.selected_indices.clone()
+                } else {
+                    answer_state
+                        .selected_indices
+                        .first()
+                        .copied()
+                        .or(answer_state.options_state.selected_idx)
+                        .into_iter()
+                        .collect()
+                }
             } else {
                 Vec::new()
             };
@@ -1262,9 +1289,10 @@ impl BottomPaneView for RequestUserInputOverlay {
                         }
                     }
                     KeyCode::Enter => {
-                        if !self.has_selected_option()
-                            && !self.current_question_allows_multiple()
-                            && self.question_count() == 1
+                        if !self.current_question_allows_multiple()
+                            && self
+                                .current_answer()
+                                .is_some_and(|answer| answer.selected_indices.is_empty())
                         {
                             self.select_current_option(true);
                         }
