@@ -1,0 +1,38 @@
+---
+source: tui/src/app.rs
+assertion_line: 6843
+expression: popup
+---
+Project Switcher  Workspace 1 (1/1)
+/workspace/codex  Attention soft
+╔Open Tabs═════════════════════════════════════════════════╗
+║╔═════════════════════════╗ ┌─────────────────────────┐   ║
+║║codex                    ║ │obsidian                 │   ║
+║║/workspace/codex         ║ │/workspace/obsidian      │   ║
+║║Ready                    ║ │Ready                    │   ║
+║╚═════════════════════════╝ └─────────────────────────┘   ║
+║┌─────────────────────────┐ ┌─────────────────────────┐   ║
+║│riff-connect             │ │dragonfly                │   ║
+║│/workspace/riff-connect  │ │/workspace/dragonfly     │   ║
+║│Ready                    │ │Ready                    │   ║
+║└─────────────────────────┘ └─────────────────────────┘   ║
+╚══════════════════════════════════════════════════════════╝
+┌Favorites─────────────────────────────────────────────────┐
+│┌─────────────────────────┐ ┌─────────────────────────┐   │
+││nevercluster             │ │citadel                  │   │
+││/workspace/nevercluster  │ │/workspace/citadel       │   │
+││Press X to edit favorites│ │Press X to edit favorites│   │
+│└─────────────────────────┘ └─────────────────────────┘   │
+│┌─────────────────────────┐                               │
+││flagship                 │                               │
+││/workspace/flagship      │                               │
+││Press X to edit favorites│                               │
+│└─────────────────────────┘                               │
+└──────────────────────────────────────────────────────────┘
+┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐
+│Browse proj│ │Browse /   │ │Edit favori│ │Attention o│
+└───────────┘ └───────────┘ └───────────┘ └───────────┘
+┌───────────┐ ┌───────────┐
+│Close tab  │ │Save + quit│
+└───────────┘ └───────────┘
+Press enter to confirm or esc to go back

@@ -6,13 +6,19 @@ use crate::app_event::RealtimeAudioDeviceKind;
 use crate::app_event::WindowsSandboxEnableMode;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
+use crate::bottom_pane::FavoriteProjectTile;
+use crate::bottom_pane::FavoritesEditorView;
 use crate::bottom_pane::FeedbackAudience;
-use crate::bottom_pane::McpServerElicitationFormRequest;
+use crate::bottom_pane::ProjectSwitcherTabTile;
+use crate::bottom_pane::ProjectSwitcherView;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ExternalEditorState;
+use crate::chatwidget::ProjectAttentionLevel;
+use crate::chatwidget::ProjectTabChromeEntry;
+use crate::chatwidget::ProjectTabsChromeState;
 use crate::chatwidget::ThreadInputState;
 use crate::cwd_prompt::CwdPromptAction;
 use crate::diff_render::DiffSummary;
@@ -34,6 +40,7 @@ use crate::pager_overlay::Overlay;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::Renderable;
 use crate::resume_picker::SessionSelection;
+use crate::resume_picker::WorkspaceSessionTarget;
 use crate::tui;
 use crate::tui::GamepadAction;
 use crate::tui::TuiEvent;
@@ -52,6 +59,7 @@ use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::types::ModelAvailabilityNuxConfig;
 use codex_core::config_loader::ConfigLayerStackOrdering;
 use codex_core::features::Feature;
+use codex_core::find_thread_path_by_id_str;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::models_manager::manager::RefreshStrategy;
 use codex_core::models_manager::model_presets::HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG;
@@ -80,6 +88,7 @@ use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SkillErrorInfo;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TurnAbortReason;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
@@ -94,6 +103,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -117,23 +127,95 @@ use toml::Value as TomlValue;
 
 mod agent_navigation;
 mod pending_interactive_replay;
+mod project_navigation;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
 use self::pending_interactive_replay::PendingInteractiveReplayState;
+pub(crate) use self::project_navigation::AttentionMode;
+use self::project_navigation::NewTabPlacement;
+pub(crate) use self::project_navigation::PersistedWorkspaceSession;
+pub(crate) use self::project_navigation::ProjectNavigationState;
+use self::project_navigation::ProjectTabDirection;
+use self::project_navigation::ProjectWorkspaceDirection;
+pub(crate) use self::project_navigation::RestoredWorkspace;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
+const PROJECT_DIRECTORY_BROWSER_VIEW_ID: &str = "project-directory-browser";
 
-enum ThreadInteractiveRequest {
-    Approval(ApprovalRequest),
-    McpServerElicitation(McpServerElicitationFormRequest),
-}
 /// Baseline cadence for periodic stream commit animation ticks.
 ///
 /// Smooth-mode streaming drains one line per tick, so this interval controls
 /// perceived typing speed for non-backlogged output.
 const COMMIT_ANIMATION_TICK: Duration = tui::TARGET_FRAME_INTERVAL;
+
+fn directory_display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn preferred_projects_root() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let projects = home.join("projects");
+    projects.is_dir().then_some(projects)
+}
+
+fn attention_priority(level: ProjectAttentionLevel) -> u8 {
+    match level {
+        ProjectAttentionLevel::Approval => 0,
+        ProjectAttentionLevel::UserInput => 1,
+        ProjectAttentionLevel::Error => 2,
+    }
+}
+
+fn clear_terminal_for_context_switch<B>(
+    terminal: &mut crate::custom_terminal::Terminal<B>,
+    is_alt_screen_active: bool,
+) -> Result<()>
+where
+    B: ratatui::backend::Backend + std::io::Write,
+{
+    if is_alt_screen_active {
+        terminal.clear_visible_screen()?;
+    } else {
+        // Some terminals (Terminal.app, Warp) do not reliably drop scrollback when purge and
+        // clear are emitted as separate backend commands. Prefer a single ANSI sequence.
+        terminal.clear_scrollback_and_visible_screen_ansi()?;
+    }
+
+    let mut area = terminal.viewport_area;
+    if area.y > 0 {
+        // After a full clear, anchor the inline viewport at the top so the next project redraw
+        // repaints from a clean origin instead of leaving stale rows above the viewport.
+        area.y = 0;
+        terminal.set_viewport_area(area);
+    }
+
+    Ok(())
+}
+
+fn list_child_directories(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut children = fs::read_dir(root)?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .is_some_and(|file_type| file_type.is_dir())
+                .then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    children.sort_by(|left, right| {
+        directory_display_name(left)
+            .to_lowercase()
+            .cmp(&directory_display_name(right).to_lowercase())
+    });
+    Ok(children)
+}
 
 #[derive(Debug, Clone)]
 pub struct AppExitInfo {
@@ -378,6 +460,14 @@ impl ThreadEventStore {
     fn has_pending_thread_approvals(&self) -> bool {
         self.pending_interactive_replay
             .has_pending_thread_approvals()
+    }
+
+    fn has_terminal_error_attention(&self) -> bool {
+        self.buffer.iter().rev().any(|event| match &event.msg {
+            EventMsg::Error(_) => true,
+            EventMsg::TurnAborted(ev) => matches!(ev.reason, TurnAbortReason::Replaced),
+            _ => false,
+        })
     }
 }
 
@@ -705,11 +795,14 @@ pub(crate) struct App {
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
+    project_navigation: ProjectNavigationState,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<Event>>,
     primary_thread_id: Option<ThreadId>,
     primary_session_configured: Option<SessionConfiguredEvent>,
     pending_primary_events: VecDeque<Event>,
+    last_user_input_at: Instant,
+    last_attention_switch_at: Option<Instant>,
     #[cfg(feature = "voice-input")]
     handy_gamepad: HandyGamepadState,
 }
@@ -964,22 +1057,7 @@ impl App {
 
         // Drop queued history insertions so stale transcript lines cannot be flushed after /clear.
         tui.clear_pending_history_lines();
-
-        if is_alt_screen_active {
-            tui.terminal.clear_visible_screen()?;
-        } else {
-            // Some terminals (Terminal.app, Warp) do not reliably drop scrollback when purge and
-            // clear are emitted as separate backend commands. Prefer a single ANSI sequence.
-            tui.terminal.clear_scrollback_and_visible_screen_ansi()?;
-        }
-
-        let mut area = tui.terminal.viewport_area;
-        if area.y > 0 {
-            // After a full clear, anchor the inline viewport at the top and redraw a fresh header
-            // box. `insert_history_lines()` will shift the viewport down by the rendered height.
-            area.y = 0;
-            tui.terminal.set_viewport_area(area);
-        }
+        clear_terminal_for_context_switch(&mut tui.terminal, is_alt_screen_active)?;
         self.has_emitted_history_lines = false;
 
         if redraw_header {
@@ -1156,77 +1234,6 @@ impl App {
         self.chat_widget.set_active_agent_label(label);
     }
 
-    async fn thread_cwd(&self, thread_id: ThreadId) -> Option<PathBuf> {
-        let channel = self.thread_event_channels.get(&thread_id)?;
-        let store = channel.store.lock().await;
-        match store.session_configured.as_ref().map(|event| &event.msg) {
-            Some(EventMsg::SessionConfigured(session)) => Some(session.cwd.clone()),
-            _ => None,
-        }
-    }
-
-    async fn interactive_request_for_thread_event(
-        &self,
-        thread_id: ThreadId,
-        event: &Event,
-    ) -> Option<ThreadInteractiveRequest> {
-        let thread_label = Some(self.thread_label(thread_id));
-        match &event.msg {
-            EventMsg::ExecApprovalRequest(ev) => {
-                Some(ThreadInteractiveRequest::Approval(ApprovalRequest::Exec {
-                    thread_id,
-                    thread_label,
-                    id: ev.effective_approval_id(),
-                    command: ev.command.clone(),
-                    reason: ev.reason.clone(),
-                    available_decisions: ev.effective_available_decisions(),
-                    network_approval_context: ev.network_approval_context.clone(),
-                    additional_permissions: ev.additional_permissions.clone(),
-                }))
-            }
-            EventMsg::ApplyPatchApprovalRequest(ev) => Some(ThreadInteractiveRequest::Approval(
-                ApprovalRequest::ApplyPatch {
-                    thread_id,
-                    thread_label,
-                    id: ev.call_id.clone(),
-                    reason: ev.reason.clone(),
-                    cwd: self
-                        .thread_cwd(thread_id)
-                        .await
-                        .unwrap_or_else(|| self.config.cwd.clone()),
-                    changes: ev.changes.clone(),
-                },
-            )),
-            EventMsg::ElicitationRequest(ev) => {
-                if let Some(request) =
-                    McpServerElicitationFormRequest::from_event(thread_id, ev.clone())
-                {
-                    Some(ThreadInteractiveRequest::McpServerElicitation(request))
-                } else {
-                    Some(ThreadInteractiveRequest::Approval(
-                        ApprovalRequest::McpElicitation {
-                            thread_id,
-                            thread_label,
-                            server_name: ev.server_name.clone(),
-                            request_id: ev.id.clone(),
-                            message: ev.request.message().to_string(),
-                        },
-                    ))
-                }
-            }
-            EventMsg::RequestPermissions(ev) => Some(ThreadInteractiveRequest::Approval(
-                ApprovalRequest::Permissions {
-                    thread_id,
-                    thread_label,
-                    call_id: ev.call_id.clone(),
-                    reason: ev.reason.clone(),
-                    permissions: ev.permissions.clone(),
-                },
-            )),
-            _ => None,
-        }
-    }
-
     async fn submit_op_to_thread(&mut self, thread_id: ThreadId, op: Op) {
         let replay_state_op =
             ThreadEventStore::op_can_change_pending_replay_state(&op).then(|| op.clone());
@@ -1285,17 +1292,12 @@ impl App {
             .collect();
 
         self.chat_widget.set_pending_thread_approvals(threads);
+        self.sync_project_tabs_chrome();
     }
 
     async fn enqueue_thread_event(&mut self, thread_id: ThreadId, event: Event) -> Result<()> {
         let refresh_pending_thread_approvals =
             ThreadEventStore::event_can_change_pending_thread_approvals(&event);
-        let inactive_interactive_request = if self.active_thread_id != Some(thread_id) {
-            self.interactive_request_for_thread_event(thread_id, &event)
-                .await
-        } else {
-            None
-        };
         let (sender, store) = {
             let channel = self.ensure_thread_channel(thread_id);
             (channel.sender.clone(), Arc::clone(&channel.store))
@@ -1324,20 +1326,11 @@ impl App {
                     tracing::warn!("thread {thread_id} event channel closed");
                 }
             }
-        } else if let Some(request) = inactive_interactive_request {
-            match request {
-                ThreadInteractiveRequest::Approval(request) => {
-                    self.chat_widget.push_approval_request(request);
-                }
-                ThreadInteractiveRequest::McpServerElicitation(request) => {
-                    self.chat_widget
-                        .push_mcp_server_elicitation_request(request);
-                }
-            }
         }
         if refresh_pending_thread_approvals {
             self.refresh_pending_thread_approvals().await;
         }
+        self.sync_project_tabs_chrome();
         Ok(())
     }
 
@@ -1361,12 +1354,19 @@ impl App {
 
         if let EventMsg::SessionConfigured(session) = &event.msg {
             let thread_id = session.session_id;
+            let session_cwd = session.cwd.clone();
             self.primary_thread_id = Some(thread_id);
             self.primary_session_configured = Some(session.clone());
             self.upsert_agent_picker_thread(thread_id, None, None, false);
             self.ensure_thread_channel(thread_id);
             self.activate_thread_channel(thread_id).await;
             self.enqueue_thread_event(thread_id, event).await?;
+            self.project_navigation
+                .remember_project_thread(thread_id, session_cwd.clone());
+            self.project_navigation.record_recent(session_cwd);
+            self.project_navigation.set_active_thread(thread_id);
+            self.persist_project_navigation_state("opening the main project");
+            self.sync_project_tabs_chrome();
 
             let pending = std::mem::take(&mut self.pending_primary_events);
             for pending_event in pending {
@@ -1460,6 +1460,542 @@ impl App {
         });
     }
 
+    fn persist_project_navigation_state(&mut self, action: &str) {
+        if let Err(err) = self.project_navigation.save(&self.config.codex_home) {
+            tracing::warn!(error = %err, action, "failed to persist project navigation state");
+            self.chat_widget.add_error_message(format!(
+                "Failed to save project navigation after {action}: {err}"
+            ));
+        }
+    }
+
+    fn save_workspace_session_and_exit(&mut self) -> bool {
+        if self.project_navigation.save_current_workspace_session() {
+            self.persist_project_navigation_state("saving the workspace session");
+            true
+        } else {
+            self.chat_widget
+                .add_error_message("Cannot save and quit because no project tabs are open.".into());
+            false
+        }
+    }
+
+    fn build_project_switcher_tabs(&self) -> Vec<ProjectSwitcherTabTile> {
+        let current_thread_id = self.current_displayed_thread_id();
+        let show_attention = self.project_navigation.attention_markers_enabled();
+        self.project_navigation
+            .active_workspace_tabs()
+            .into_iter()
+            .map(|(thread_id, cwd)| ProjectSwitcherTabTile {
+                thread_id,
+                label: directory_display_name(&cwd),
+                cwd,
+                summary: self.thread_work_summary(thread_id),
+                is_active: current_thread_id == Some(thread_id),
+                attention: show_attention
+                    .then(|| self.thread_attention_level(thread_id))
+                    .flatten(),
+            })
+            .collect()
+    }
+
+    fn build_favorite_tiles(&self) -> Vec<FavoriteProjectTile> {
+        self.project_navigation
+            .favorites()
+            .iter()
+            .map(|favorite| FavoriteProjectTile {
+                cwd: favorite.clone(),
+                label: directory_display_name(favorite),
+                description: self
+                    .project_navigation
+                    .favorite_description(favorite)
+                    .map(ToOwned::to_owned),
+                is_open: self
+                    .project_navigation
+                    .find_thread_for_cwd(favorite)
+                    .is_some(),
+            })
+            .collect()
+    }
+
+    fn thread_work_summary(&self, thread_id: ThreadId) -> Option<String> {
+        let store = self
+            .thread_event_channels
+            .get(&thread_id)?
+            .store
+            .try_lock()
+            .ok()?;
+        store
+            .buffer
+            .iter()
+            .rev()
+            .find_map(|event| match &event.msg {
+                EventMsg::UserMessage(user) => Some(user.message.clone()),
+                _ => None,
+            })
+            .map(|text| {
+                let trimmed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                trimmed.chars().take(140).collect()
+            })
+    }
+
+    fn thread_attention_level(&self, thread_id: ThreadId) -> Option<ProjectAttentionLevel> {
+        let store = self
+            .thread_event_channels
+            .get(&thread_id)?
+            .store
+            .try_lock()
+            .ok()?;
+        if store
+            .pending_interactive_replay
+            .has_pending_thread_approvals()
+        {
+            return Some(ProjectAttentionLevel::Approval);
+        }
+        if store.pending_interactive_replay.has_pending_user_input() {
+            return Some(ProjectAttentionLevel::UserInput);
+        }
+        store
+            .has_terminal_error_attention()
+            .then_some(ProjectAttentionLevel::Error)
+    }
+
+    fn sync_project_tabs_chrome(&mut self) {
+        let tabs = self.build_project_switcher_tabs();
+        if tabs.is_empty() {
+            self.chat_widget.set_project_tabs(None);
+            return;
+        }
+        self.chat_widget
+            .set_project_tabs(Some(ProjectTabsChromeState {
+                workspace_custom_name: self
+                    .project_navigation
+                    .custom_workspace_name(self.project_navigation.active_workspace_index())
+                    .map(ToOwned::to_owned),
+                workspace_index: self.project_navigation.active_workspace_index(),
+                workspace_count: self.project_navigation.workspace_count(),
+                attention_mode: self.project_navigation.attention_mode(),
+                tabs: tabs
+                    .into_iter()
+                    .map(|tile| ProjectTabChromeEntry {
+                        label: tile.label,
+                        attention: tile.attention,
+                        is_active: tile.is_active,
+                    })
+                    .collect(),
+            }));
+    }
+
+    fn open_project_navigator(&mut self) {
+        let workspace_index = self.project_navigation.active_workspace_index();
+        let workspace_count = self.project_navigation.workspace_count();
+        let workspace_name = self.project_navigation.workspace_name(workspace_index);
+        let tabs = self.build_project_switcher_tabs();
+        let favorites = self.build_favorite_tiles();
+        let current_cwd = self.chat_widget.config_ref().cwd.clone();
+        self.chat_widget
+            .show_custom_view(Box::new(ProjectSwitcherView::new(
+                self.app_event_tx.clone(),
+                workspace_name,
+                workspace_index,
+                workspace_count,
+                self.project_navigation.attention_mode(),
+                tabs,
+                favorites,
+                current_cwd,
+            )));
+    }
+
+    fn open_project_favorites_manager(&mut self, initial_path: Option<PathBuf>) {
+        self.chat_widget
+            .show_custom_view(Box::new(FavoritesEditorView::new(
+                self.app_event_tx.clone(),
+                self.build_favorite_tiles(),
+                self.project_navigation.recents().to_vec(),
+                initial_path,
+            )));
+    }
+
+    fn note_user_input(&mut self) {
+        self.last_user_input_at = Instant::now();
+    }
+
+    fn attention_idle_delay(&self) -> Duration {
+        Duration::from_secs(self.project_navigation.attention_idle_delay_seconds())
+    }
+
+    fn should_preserve_attention_idle_timer_on_input(&self) -> bool {
+        if self.project_navigation.attention_mode() != AttentionMode::On {
+            return false;
+        }
+
+        self.current_displayed_thread_id()
+            .and_then(|thread_id| self.thread_attention_level(thread_id))
+            .is_some_and(|level| {
+                matches!(
+                    level,
+                    ProjectAttentionLevel::Approval | ProjectAttentionLevel::UserInput
+                )
+            })
+    }
+
+    fn attention_target_thread_id(&self) -> Option<ThreadId> {
+        let active_thread_id = self.current_displayed_thread_id();
+        self.project_navigation
+            .all_workspace_tabs()
+            .into_iter()
+            .filter_map(|(_, thread_id, _)| {
+                self.thread_attention_level(thread_id)
+                    .map(|level| (attention_priority(level), thread_id))
+            })
+            .filter(|(_, thread_id)| Some(*thread_id) != active_thread_id)
+            .min_by_key(|(priority, thread_id)| (*priority, thread_id.to_string()))
+            .map(|(_, thread_id)| thread_id)
+    }
+
+    async fn maybe_trigger_attention_mode(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        if !self.project_navigation.attention_auto_switches()
+            || self.overlay.is_some()
+            || !self.chat_widget.no_modal_or_popup_active()
+        {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if now.saturating_duration_since(self.last_user_input_at) < self.attention_idle_delay() {
+            return Ok(());
+        }
+        if self
+            .last_attention_switch_at
+            .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_secs(1))
+        {
+            return Ok(());
+        }
+
+        let Some(target_thread_id) = self.attention_target_thread_id() else {
+            return Ok(());
+        };
+
+        self.last_attention_switch_at = Some(now);
+        self.select_agent_thread(tui, target_thread_id).await?;
+        self.refresh_in_memory_config_from_disk_best_effort("switching for attention mode")
+            .await;
+        self.file_search
+            .update_search_dir(self.chat_widget.config_ref().cwd.clone());
+        self.chat_widget.add_info_message(
+            "Attention mode switched to a project that needs you.".to_string(),
+            None,
+        );
+        Ok(())
+    }
+
+    fn open_project_directory_browser(&mut self, root: PathBuf) {
+        let children = match list_child_directories(&root) {
+            Ok(children) => children,
+            Err(err) => {
+                let root_display = root.display();
+                self.chat_widget.add_error_message(format!(
+                    "Failed to browse directories under {root_display}: {err}"
+                ));
+                return;
+            }
+        };
+
+        let mut items = Vec::new();
+        let search_root = root.display().to_string();
+        items.push(SelectionItem {
+            name: format!("Open: {}", directory_display_name(&root)),
+            description: Some(search_root.clone()),
+            is_current: self.chat_widget.config_ref().cwd == root,
+            dismiss_on_select: true,
+            search_value: Some(format!("open {search_root}")),
+            actions: vec![Box::new({
+                let cwd = root.clone();
+                move |tx| {
+                    tx.send(AppEvent::FocusOrOpenProject { cwd: cwd.clone() });
+                }
+            })],
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: if self.project_navigation.is_favorite(&root) {
+                "Favorites: Remove this directory".to_string()
+            } else {
+                "Favorites: Add this directory".to_string()
+            },
+            description: Some(search_root.clone()),
+            dismiss_on_select: true,
+            search_value: Some(format!("favorite {search_root}")),
+            actions: vec![Box::new({
+                let cwd = root.clone();
+                move |tx| {
+                    tx.send(AppEvent::ToggleFavoriteProject { cwd: cwd.clone() });
+                }
+            })],
+            ..Default::default()
+        });
+
+        if let Some(parent) = root.parent() {
+            items.push(SelectionItem {
+                name: "Browse: ..".to_string(),
+                description: Some(parent.display().to_string()),
+                dismiss_on_select: true,
+                search_value: Some(parent.display().to_string()),
+                actions: vec![Box::new({
+                    let parent = parent.to_path_buf();
+                    move |tx| {
+                        tx.send(AppEvent::OpenProjectDirectoryBrowser {
+                            root: parent.clone(),
+                        });
+                    }
+                })],
+                ..Default::default()
+            });
+        }
+
+        for child in children {
+            let description = child.display().to_string();
+            items.push(SelectionItem {
+                name: format!("Browse: {}", directory_display_name(&child)),
+                description: Some(description.clone()),
+                dismiss_on_select: true,
+                search_value: Some(description),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::OpenProjectDirectoryBrowser {
+                        root: child.clone(),
+                    });
+                })],
+                ..Default::default()
+            });
+        }
+
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            view_id: Some(PROJECT_DIRECTORY_BROWSER_VIEW_ID),
+            title: Some("Browse Directories".to_string()),
+            subtitle: Some(root.display().to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Filter directories...".to_string()),
+            ..Default::default()
+        });
+    }
+
+    async fn focus_or_open_project(&mut self, tui: &mut tui::Tui, cwd: PathBuf) -> Result<()> {
+        if let Some((_, thread_id)) = self.project_navigation.find_thread_for_cwd(&cwd) {
+            self.select_agent_thread(tui, thread_id).await?;
+            self.refresh_in_memory_config_from_disk_best_effort("switching project tabs")
+                .await;
+            self.file_search
+                .update_search_dir(self.chat_widget.config_ref().cwd.clone());
+            return Ok(());
+        }
+
+        self.open_project_in_new_tab(tui, cwd, NewTabPlacement::Right)
+            .await
+    }
+
+    async fn open_project_in_new_tab(
+        &mut self,
+        tui: &mut tui::Tui,
+        cwd: PathBuf,
+        placement: NewTabPlacement,
+    ) -> Result<()> {
+        let mut config = self.rebuild_config_for_cwd(cwd.clone()).await?;
+        self.apply_runtime_policy_overrides(&mut config);
+        config.model = Some(self.chat_widget.current_model().to_string());
+        config.model_reasoning_effort = self.chat_widget.current_reasoning_effort();
+        config.personality = self.config.personality;
+        config.service_tier = self.chat_widget.current_service_tier();
+
+        let new_thread = match self.server.start_thread(config).await {
+            Ok(thread) => thread,
+            Err(err) => {
+                let cwd_display = cwd.display();
+                self.chat_widget.add_error_message(format!(
+                    "Failed to open project tab for {cwd_display}: {err}"
+                ));
+                return Ok(());
+            }
+        };
+
+        let anchor_thread_id = self.current_displayed_thread_id();
+        self.handle_thread_created(new_thread.thread_id).await?;
+        self.project_navigation.insert_project_thread(
+            new_thread.thread_id,
+            cwd.clone(),
+            anchor_thread_id,
+            placement,
+        );
+        self.project_navigation.record_recent(cwd);
+        self.persist_project_navigation_state("opening a project tab");
+        self.select_agent_thread(tui, new_thread.thread_id).await?;
+        self.sync_project_tabs_chrome();
+        self.refresh_in_memory_config_from_disk_best_effort("opening a project tab")
+            .await;
+        self.file_search
+            .update_search_dir(self.chat_widget.config_ref().cwd.clone());
+        Ok(())
+    }
+
+    fn toggle_project_favorite(&mut self, cwd: PathBuf) {
+        let action = if self.project_navigation.toggle_favorite(cwd.clone()) {
+            "Added"
+        } else {
+            "Removed"
+        };
+        self.persist_project_navigation_state("updating favorites");
+        self.sync_project_tabs_chrome();
+        self.chat_widget
+            .add_info_message(format!("{action} {}.", cwd.display()), None);
+    }
+
+    fn forget_recent_project(&mut self, cwd: PathBuf) {
+        self.project_navigation.remove_recent(&cwd);
+        self.persist_project_navigation_state("updating recent projects");
+        self.sync_project_tabs_chrome();
+        self.chat_widget
+            .add_info_message(format!("Forgot recent project {}.", cwd.display()), None);
+    }
+
+    async fn edit_project_favorites(&mut self, tui: &mut tui::Tui) {
+        let editor_cmd = match external_editor::resolve_editor_command() {
+            Ok(cmd) => cmd,
+            Err(external_editor::EditorError::MissingEditor) => {
+                self.chat_widget
+                    .add_to_history(history_cell::new_error_event(
+                        "Cannot edit favorites: set $VISUAL or $EDITOR before starting Codex."
+                            .to_string(),
+                    ));
+                return;
+            }
+            Err(err) => {
+                self.chat_widget
+                    .add_to_history(history_cell::new_error_event(format!(
+                        "Failed to open favorites editor: {err}",
+                    )));
+                return;
+            }
+        };
+
+        self.persist_project_navigation_state("preparing the favorites editor");
+        let state_path = ProjectNavigationState::state_file_path(&self.config.codex_home);
+        let state_path_display = state_path.display().to_string();
+        let editor_result = tui
+            .with_restored(tui::RestoreMode::KeepRaw, || async {
+                external_editor::run_editor_for_path(&state_path, &editor_cmd).await
+            })
+            .await;
+
+        match editor_result {
+            Ok(()) => match self
+                .project_navigation
+                .reload_persisted(&self.config.codex_home)
+            {
+                Ok(()) => {
+                    self.sync_project_tabs_chrome();
+                    self.chat_widget.add_info_message(
+                        format!("Reloaded favorites from {state_path_display}."),
+                        None,
+                    );
+                }
+                Err(err) => {
+                    self.chat_widget.add_error_message(format!(
+                        "Edited favorites file, but failed to reload {state_path_display}: {err}"
+                    ));
+                }
+            },
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to edit favorites file {state_path_display}: {err}"
+                ));
+            }
+        }
+        tui.frame_requester().schedule_frame();
+    }
+
+    async fn close_project_tab(&mut self, tui: &mut tui::Tui, thread_id: ThreadId) -> Result<()> {
+        let Some(next_thread_id) = self
+            .project_navigation
+            .adjacent_tab(Some(thread_id), ProjectTabDirection::Next)
+        else {
+            self.chat_widget
+                .add_info_message("Can't close the last project tab yet.".to_string(), None);
+            return Ok(());
+        };
+        let closed_cwd = self
+            .project_navigation
+            .tab_cwd(thread_id)
+            .map(Path::to_path_buf);
+
+        if self.chat_widget.thread_id() == Some(thread_id) {
+            self.backtrack.pending_rollback = None;
+            self.suppress_shutdown_complete = true;
+            self.chat_widget.submit_op(Op::Shutdown);
+        }
+        self.server.remove_thread(&thread_id).await;
+        self.abort_thread_event_listener(thread_id);
+        self.project_navigation.remove_thread(thread_id);
+        self.persist_project_navigation_state("closing a project tab");
+        self.mark_agent_picker_thread_closed(thread_id);
+        self.select_agent_thread(tui, next_thread_id).await?;
+        self.sync_project_tabs_chrome();
+
+        let closed_label = closed_cwd
+            .as_deref()
+            .map(directory_display_name)
+            .unwrap_or_else(|| thread_id.to_string());
+        self.chat_widget
+            .add_info_message(format!("Closed tab {closed_label}."), None);
+        Ok(())
+    }
+
+    async fn switch_project_tab(
+        &mut self,
+        tui: &mut tui::Tui,
+        direction: ProjectTabDirection,
+    ) -> Result<()> {
+        let Some(thread_id) = self
+            .project_navigation
+            .adjacent_tab(self.current_displayed_thread_id(), direction)
+        else {
+            return Ok(());
+        };
+        self.select_agent_thread(tui, thread_id).await?;
+        self.sync_project_tabs_chrome();
+        self.refresh_in_memory_config_from_disk_best_effort("switching project tabs")
+            .await;
+        self.file_search
+            .update_search_dir(self.chat_widget.config_ref().cwd.clone());
+        Ok(())
+    }
+
+    async fn switch_project_workspace(
+        &mut self,
+        tui: &mut tui::Tui,
+        direction: ProjectWorkspaceDirection,
+    ) -> Result<()> {
+        let target_thread_id = self.project_navigation.switch_workspace(direction);
+        if let Some(thread_id) = target_thread_id {
+            self.select_agent_thread(tui, thread_id).await?;
+            self.sync_project_tabs_chrome();
+            self.refresh_in_memory_config_from_disk_best_effort("switching workspaces")
+                .await;
+            self.file_search
+                .update_search_dir(self.chat_widget.config_ref().cwd.clone());
+            return Ok(());
+        }
+
+        let workspace_label = self
+            .project_navigation
+            .workspace_name(self.project_navigation.active_workspace_index());
+        self.chat_widget.add_info_message(
+            format!("{workspace_label} is empty. Press Start to pick a project."),
+            None,
+        );
+        self.sync_project_tabs_chrome();
+        Ok(())
+    }
+
     /// Updates cached picker metadata and then mirrors any visible-label change into the footer.
     ///
     /// These two writes stay paired so the picker rows and contextual footer continue to describe
@@ -1541,6 +2077,12 @@ impl App {
         }
         self.drain_active_thread_events(tui).await?;
         self.refresh_pending_thread_approvals().await;
+        self.project_navigation.set_active_thread(thread_id);
+        if let Some(cwd) = self.project_navigation.tab_cwd(thread_id) {
+            self.project_navigation.record_recent(cwd.to_path_buf());
+            self.persist_project_navigation_state("switching project tabs");
+        }
+        self.sync_project_tabs_chrome();
 
         Ok(())
     }
@@ -1552,8 +2094,9 @@ impl App {
         self.has_emitted_history_lines = false;
         self.backtrack = BacktrackState::default();
         self.backtrack_render_pending = false;
-        tui.terminal.clear_scrollback()?;
-        tui.terminal.clear()?;
+        tui.clear_pending_history_lines();
+        let is_alt_screen_active = tui.is_alt_screen_active();
+        clear_terminal_for_context_switch(&mut tui.terminal, is_alt_screen_active)?;
         Ok(())
     }
 
@@ -1561,12 +2104,14 @@ impl App {
         self.abort_all_thread_event_listeners();
         self.thread_event_channels.clear();
         self.agent_navigation.clear();
+        self.project_navigation = ProjectNavigationState::load(&self.config.codex_home);
         self.active_thread_id = None;
         self.active_thread_rx = None;
         self.primary_thread_id = None;
         self.pending_primary_events.clear();
         self.chat_widget.set_pending_thread_approvals(Vec::new());
         self.sync_active_agent_label();
+        self.sync_project_tabs_chrome();
     }
 
     async fn start_fresh_session_with_summary_hint(&mut self, tui: &mut tui::Tui) {
@@ -1613,6 +2158,83 @@ impl App {
             self.chat_widget.add_plain_history_lines(lines);
         }
         tui.frame_requester().schedule_frame();
+    }
+
+    async fn restore_saved_workspace_session(
+        &mut self,
+        session: PersistedWorkspaceSession,
+    ) -> Result<()> {
+        let active_thread_id = self.chat_widget.thread_id();
+        let mut restored_workspaces = Vec::with_capacity(session.workspaces.len());
+        let mut restored_any = false;
+        let mut skipped_tabs = 0usize;
+
+        for workspace in session.workspaces {
+            let mut tabs = Vec::with_capacity(workspace.tabs.len());
+            for saved_tab in workspace.tabs {
+                if active_thread_id == Some(saved_tab.thread_id) {
+                    tabs.push((saved_tab.thread_id, saved_tab.cwd.clone()));
+                    restored_any = true;
+                    continue;
+                }
+
+                let Some(path) = find_thread_path_by_id_str(
+                    &self.config.codex_home,
+                    &saved_tab.thread_id.to_string(),
+                )
+                .await?
+                else {
+                    skipped_tabs += 1;
+                    continue;
+                };
+                let resume_cwd = crate::read_session_cwd(&self.config, saved_tab.thread_id, &path)
+                    .await
+                    .unwrap_or_else(|| saved_tab.cwd.clone());
+                let mut resume_config = self.rebuild_config_for_cwd(resume_cwd).await?;
+                self.apply_runtime_policy_overrides(&mut resume_config);
+
+                match self
+                    .server
+                    .resume_thread_from_rollout(resume_config, path, self.auth_manager.clone())
+                    .await
+                {
+                    Ok(resumed) => {
+                        self.handle_thread_created(resumed.thread_id).await?;
+                        tabs.push((resumed.thread_id, resumed.session_configured.cwd.clone()));
+                        restored_any = true;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            cwd = %saved_tab.cwd.display(),
+                            "failed to restore saved workspace tab"
+                        );
+                        skipped_tabs += 1;
+                    }
+                }
+            }
+
+            let active_tab = workspace.active_tab.filter(|idx| *idx < tabs.len());
+            restored_workspaces.push(RestoredWorkspace { tabs, active_tab });
+        }
+
+        if restored_any {
+            self.project_navigation
+                .apply_restored_workspace_session(restored_workspaces, session.active_workspace);
+            if let Some(thread_id) = active_thread_id {
+                self.project_navigation.set_active_thread(thread_id);
+            }
+            self.sync_project_tabs_chrome();
+            self.persist_project_navigation_state("restoring the saved workspace session");
+        }
+
+        if skipped_tabs > 0 {
+            self.chat_widget.add_error_message(format!(
+                "Skipped {skipped_tabs} saved tab(s) while restoring the workspace session."
+            ));
+        }
+
+        Ok(())
     }
 
     fn fresh_session_config(&self) -> Config {
@@ -1815,7 +2437,7 @@ impl App {
         let enhanced_keys_supported = tui.enhanced_keys_supported();
         let wait_for_initial_session_configured =
             Self::should_wait_for_initial_session(&session_selection);
-        let mut chat_widget = match session_selection {
+        let mut chat_widget = match &session_selection {
             SessionSelection::StartFresh | SessionSelection::Exit => {
                 let startup_tooltip_override =
                     prepare_startup_tooltip_override(&mut config, &available_models, is_first_run)
@@ -1878,6 +2500,42 @@ impl App {
                 };
                 ChatWidget::new_from_existing(init, resumed.thread, resumed.session_configured)
             }
+            SessionSelection::ResumeWorkspace(WorkspaceSessionTarget {
+                active_session, ..
+            }) => {
+                let resumed = thread_manager
+                    .resume_thread_from_rollout(
+                        config.clone(),
+                        active_session.path.clone(),
+                        auth_manager.clone(),
+                    )
+                    .await
+                    .wrap_err_with(|| {
+                        let path_display = active_session.path.display();
+                        format!("Failed to resume workspace session from {path_display}")
+                    })?;
+                let init = crate::chatwidget::ChatWidgetInit {
+                    config: config.clone(),
+                    frame_requester: tui.frame_requester(),
+                    app_event_tx: app_event_tx.clone(),
+                    initial_user_message: crate::chatwidget::create_initial_user_message(
+                        initial_prompt.clone(),
+                        initial_images.clone(),
+                        Vec::new(),
+                    ),
+                    enhanced_keys_supported,
+                    auth_manager: auth_manager.clone(),
+                    models_manager: thread_manager.get_models_manager(),
+                    feedback: feedback.clone(),
+                    is_first_run,
+                    feedback_audience,
+                    model: config.model.clone(),
+                    startup_tooltip_override: None,
+                    status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
+                    session_telemetry: session_telemetry.clone(),
+                };
+                ChatWidget::new_from_existing(init, resumed.thread, resumed.session_configured)
+            }
             SessionSelection::Fork(target_session) => {
                 session_telemetry.counter("codex.thread.fork", 1, &[("source", "cli_subcommand")]);
                 let forked = thread_manager
@@ -1924,6 +2582,7 @@ impl App {
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
+        let project_navigation = ProjectNavigationState::load(&config.codex_home);
         let mut app = Self {
             server: thread_manager.clone(),
             session_telemetry: session_telemetry.clone(),
@@ -1955,14 +2614,24 @@ impl App {
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
+            project_navigation,
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
+            last_user_input_at: Instant::now(),
+            last_attention_switch_at: None,
             #[cfg(feature = "voice-input")]
             handy_gamepad: HandyGamepadState::default(),
         };
+
+        if let Some(thread_id) = app.chat_widget.thread_id() {
+            app.handle_thread_created(thread_id).await?;
+        }
+        if let SessionSelection::ResumeWorkspace(target) = session_selection {
+            app.restore_saved_workspace_session(target.session).await?;
+        }
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
         #[cfg(target_os = "windows")]
@@ -2094,6 +2763,11 @@ impl App {
             }
         }
 
+        if !matches!(event, TuiEvent::Draw) && !self.should_preserve_attention_idle_timer_on_input()
+        {
+            self.note_user_input();
+        }
+
         if self.overlay.is_some() {
             let _ = self.handle_backtrack_overlay_event(tui, event).await?;
         } else {
@@ -2113,6 +2787,7 @@ impl App {
                     self.handle_gamepad_action(tui, action).await;
                 }
                 TuiEvent::Draw => {
+                    self.maybe_trigger_attention_mode(tui).await?;
                     if self.backtrack_render_pending {
                         self.backtrack_render_pending = false;
                         self.render_transcript_once(tui);
@@ -2126,6 +2801,10 @@ impl App {
                     }
                     // Allow widgets to process any pending timers before rendering.
                     self.chat_widget.pre_draw_tick();
+                    tui.set_top_bar_line(
+                        self.chat_widget
+                            .project_tabs_line(tui.terminal.size()?.width),
+                    );
                     tui.draw(
                         self.chat_widget.desired_height(tui.terminal.size()?.width),
                         |frame| {
@@ -2243,11 +2922,17 @@ impl App {
                     }
                     SessionSelection::Exit
                     | SessionSelection::StartFresh
+                    | SessionSelection::ResumeWorkspace(_)
                     | SessionSelection::Fork(_) => {}
                 }
 
                 // Leaving alt-screen may blank the inline viewport; force a redraw either way.
                 tui.frame_requester().schedule_frame();
+            }
+            AppEvent::SaveWorkspaceAndExit => {
+                if self.save_workspace_session_and_exit() {
+                    return Ok(self.handle_exit_mode(ExitMode::ShutdownFirst));
+                }
             }
             AppEvent::ForkCurrentSession => {
                 self.session_telemetry.counter(
@@ -3175,6 +3860,41 @@ impl App {
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker().await;
             }
+            AppEvent::OpenProjectDirectoryBrowser { root } => {
+                self.open_project_directory_browser(root);
+            }
+            AppEvent::FocusOrOpenProject { cwd } => {
+                self.focus_or_open_project(tui, cwd).await?;
+                self.sync_project_tabs_chrome();
+            }
+            AppEvent::ToggleFavoriteProject { cwd } => {
+                self.toggle_project_favorite(cwd);
+            }
+            AppEvent::EditProjectFavorites => {
+                self.edit_project_favorites(tui).await;
+            }
+            AppEvent::OpenProjectFavoritesManager { initial_path } => {
+                self.open_project_favorites_manager(initial_path);
+            }
+            AppEvent::ForgetRecentProject { cwd } => {
+                self.forget_recent_project(cwd);
+            }
+            AppEvent::SetAttentionMode { mode } => {
+                self.project_navigation.set_attention_mode(mode);
+                self.persist_project_navigation_state("updating attention mode");
+                self.sync_project_tabs_chrome();
+                self.chat_widget.add_info_message(
+                    match mode {
+                        AttentionMode::Off => "Attention mode off.".to_string(),
+                        AttentionMode::Soft => "Attention mode soft.".to_string(),
+                        AttentionMode::On => "Attention mode on.".to_string(),
+                    },
+                    None,
+                );
+            }
+            AppEvent::CloseProjectTab { thread_id } => {
+                self.close_project_tab(tui, thread_id).await?;
+            }
             AppEvent::SelectAgentThread(thread_id) => {
                 self.select_agent_thread(tui, thread_id).await?;
             }
@@ -3572,6 +4292,8 @@ impl App {
             }
         };
         let config_snapshot = thread.config_snapshot().await;
+        let is_project_thread = config_snapshot.session_source.get_agent_role().is_none();
+        let thread_cwd = config_snapshot.cwd.clone();
         self.upsert_agent_picker_thread(
             thread_id,
             config_snapshot.session_source.get_nickname(),
@@ -3589,7 +4311,7 @@ impl App {
                 service_tier: config_snapshot.service_tier,
                 approval_policy: config_snapshot.approval_policy,
                 sandbox_policy: config_snapshot.sandbox_policy,
-                cwd: config_snapshot.cwd,
+                cwd: thread_cwd.clone(),
                 reasoning_effort: config_snapshot.reasoning_effort,
                 history_log_id: 0,
                 history_entry_count: 0,
@@ -3616,6 +4338,12 @@ impl App {
         });
         self.thread_event_listener_tasks
             .insert(thread_id, listener_handle);
+        if is_project_thread {
+            self.project_navigation
+                .remember_project_thread(thread_id, thread_cwd.clone());
+            self.project_navigation.record_recent(thread_cwd);
+            self.persist_project_navigation_state("tracking a project tab");
+        }
         Ok(())
     }
 
@@ -3887,6 +4615,12 @@ impl App {
             GamepadAction::Down => Some(KeyEvent::from(KeyCode::Down)),
             GamepadAction::Left => Some(KeyEvent::from(KeyCode::Left)),
             GamepadAction::Right => Some(KeyEvent::from(KeyCode::Right)),
+            GamepadAction::OpenProjectNavigator => {
+                if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
+                    self.open_project_navigator();
+                }
+                None
+            }
             GamepadAction::Confirm => Some(KeyEvent::from(
                 active_view_override.unwrap_or(KeyCode::Enter),
             )),
@@ -3896,9 +4630,58 @@ impl App {
             GamepadAction::Alternate => Some(KeyEvent::from(
                 active_view_override.unwrap_or(KeyCode::Char(' ')),
             )),
+            GamepadAction::ProjectTabPrevious => {
+                if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
+                    let _ = self
+                        .switch_project_tab(tui, ProjectTabDirection::Previous)
+                        .await;
+                }
+                None
+            }
+            GamepadAction::ProjectTabNext => {
+                if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
+                    let _ = self
+                        .switch_project_tab(tui, ProjectTabDirection::Next)
+                        .await;
+                }
+                None
+            }
+            GamepadAction::ProjectNewTabLeft => {
+                if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
+                    let cwd = self.chat_widget.config_ref().cwd.clone();
+                    let _ = self
+                        .open_project_in_new_tab(tui, cwd, NewTabPlacement::Left)
+                        .await;
+                }
+                None
+            }
+            GamepadAction::ProjectNewTabRight => {
+                if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
+                    let cwd = self.chat_widget.config_ref().cwd.clone();
+                    let _ = self
+                        .open_project_in_new_tab(tui, cwd, NewTabPlacement::Right)
+                        .await;
+                }
+                None
+            }
+            GamepadAction::ProjectWorkspacePrevious => {
+                if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
+                    let _ = self
+                        .switch_project_workspace(tui, ProjectWorkspaceDirection::Previous)
+                        .await;
+                }
+                None
+            }
+            GamepadAction::ProjectWorkspaceNext => {
+                if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
+                    let _ = self
+                        .switch_project_workspace(tui, ProjectWorkspaceDirection::Next)
+                        .await;
+                }
+                None
+            }
             GamepadAction::PreviousPage => Some(KeyEvent::from(KeyCode::PageUp)),
             GamepadAction::NextPage => Some(KeyEvent::from(KeyCode::PageDown)),
-            GamepadAction::FocusPrevious => Some(KeyEvent::from(KeyCode::BackTab)),
             GamepadAction::FocusNext => Some(KeyEvent::from(KeyCode::Tab)),
             GamepadAction::PushToTalkStart => {
                 self.handle_handy_push_to_talk(true);
@@ -4135,6 +4918,7 @@ mod tests {
     use crate::history_cell::UserHistoryCell;
     use crate::history_cell::new_session_info;
     use crate::multi_agents::AgentPickerThreadEntry;
+    use crate::test_backend::VT100Backend;
     use assert_matches::assert_matches;
     use codex_core::CodexAuth;
     use codex_core::config::ConfigBuilder;
@@ -4165,7 +4949,9 @@ mod tests {
     use crossterm::event::KeyModifiers;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
+    use ratatui::buffer::Buffer;
     use ratatui::prelude::Line;
+    use ratatui::prelude::Rect;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -4215,6 +5001,18 @@ mod tests {
                 crate::resume_picker::SessionTarget {
                     path: PathBuf::from("/tmp/fork"),
                     thread_id: ThreadId::new(),
+                }
+            )),
+            false
+        );
+        assert_eq!(
+            App::should_wait_for_initial_session(&SessionSelection::ResumeWorkspace(
+                WorkspaceSessionTarget {
+                    active_session: crate::resume_picker::SessionTarget {
+                        path: PathBuf::from("/tmp/workspace"),
+                        thread_id: ThreadId::new(),
+                    },
+                    session: PersistedWorkspaceSession::default(),
                 }
             )),
             false
@@ -4271,6 +5069,80 @@ mod tests {
             App::should_handle_active_thread_events(wait_for_fork, true),
             true
         );
+        let wait_for_workspace = App::should_wait_for_initial_session(
+            &SessionSelection::ResumeWorkspace(WorkspaceSessionTarget {
+                active_session: crate::resume_picker::SessionTarget {
+                    path: PathBuf::from("/tmp/workspace"),
+                    thread_id: ThreadId::new(),
+                },
+                session: PersistedWorkspaceSession::default(),
+            }),
+        );
+        assert_eq!(
+            App::should_handle_active_thread_events(wait_for_workspace, true),
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_attention_preserves_idle_timer_for_active_user_input_prompt() {
+        let mut app = make_test_app().await;
+        let thread_id = ThreadId::new();
+        app.active_thread_id = Some(thread_id);
+        app.project_navigation.set_attention_mode(AttentionMode::On);
+        app.thread_event_channels
+            .insert(thread_id, ThreadEventChannel::new(1));
+
+        let store = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("missing thread channel")
+            .store
+            .clone();
+        store.lock().await.push_event(Event {
+            id: "rui-1".to_string(),
+            msg: EventMsg::RequestUserInput(
+                codex_protocol::request_user_input::RequestUserInputEvent {
+                    call_id: "call-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    recursive: false,
+                    questions: Vec::new(),
+                },
+            ),
+        });
+
+        assert_eq!(app.should_preserve_attention_idle_timer_on_input(), true);
+    }
+
+    #[tokio::test]
+    async fn soft_attention_does_not_preserve_idle_timer_for_active_prompt() {
+        let mut app = make_test_app().await;
+        let thread_id = ThreadId::new();
+        app.active_thread_id = Some(thread_id);
+        app.project_navigation
+            .set_attention_mode(AttentionMode::Soft);
+        app.thread_event_channels
+            .insert(thread_id, ThreadEventChannel::new(1));
+
+        let store = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("missing thread channel")
+            .store
+            .clone();
+        store.lock().await.push_event(Event {
+            id: "rui-1".to_string(),
+            msg: EventMsg::RequestUserInput(
+                codex_protocol::request_user_input::RequestUserInputEvent {
+                    call_id: "call-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    recursive: false,
+                    questions: Vec::new(),
+                },
+            ),
+        });
+
+        assert_eq!(app.should_preserve_attention_idle_timer_on_input(), false);
     }
 
     #[tokio::test]
@@ -5483,7 +6355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inactive_thread_approval_bubbles_into_active_view() -> Result<()> {
+    async fn inactive_thread_approval_stays_with_its_tab() -> Result<()> {
         let mut app = make_test_app().await;
         let main_thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000011").expect("valid thread");
@@ -5552,13 +6424,51 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(app.chat_widget.has_active_view(), true);
+        assert_eq!(app.chat_widget.has_active_view(), false);
         assert_eq!(
             app.chat_widget.pending_thread_approvals(),
             &["Robie [explorer]".to_string()]
         );
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn hard_attention_targets_the_tab_that_needs_input() {
+        let mut app = make_test_app().await;
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000031").expect("valid thread");
+        let agent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000032").expect("valid thread");
+
+        app.active_thread_id = Some(main_thread_id);
+        app.project_navigation
+            .remember_project_thread(main_thread_id, PathBuf::from("/tmp/main"));
+        app.project_navigation
+            .remember_project_thread(agent_thread_id, PathBuf::from("/tmp/agent"));
+        app.project_navigation.set_active_thread(main_thread_id);
+
+        app.thread_event_channels
+            .insert(main_thread_id, ThreadEventChannel::new(1));
+        let agent_channel = ThreadEventChannel::new(1);
+        {
+            let mut store = agent_channel.store.lock().await;
+            store.push_event(Event {
+                id: "ev-user-input".to_string(),
+                msg: EventMsg::RequestUserInput(
+                    codex_protocol::request_user_input::RequestUserInputEvent {
+                        call_id: "call-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        recursive: false,
+                        questions: Vec::new(),
+                    },
+                ),
+            });
+        }
+        app.thread_event_channels
+            .insert(agent_thread_id, agent_channel);
+
+        assert_eq!(app.attention_target_thread_id(), Some(agent_thread_id));
     }
 
     #[test]
@@ -5786,10 +6696,202 @@ mod tests {
         rendered
     }
 
+    fn render_bottom_popup(chat: &ChatWidget, width: u16) -> String {
+        let height = chat.desired_height(width);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        chat.render(area, &mut buf);
+
+        let mut lines: Vec<String> = (0..area.height)
+            .map(|row| {
+                let mut line = String::new();
+                for col in 0..area.width {
+                    let symbol = buf[(area.x + col, area.y + row)].symbol();
+                    if symbol.is_empty() {
+                        line.push(' ');
+                    } else {
+                        line.push_str(symbol);
+                    }
+                }
+                line.trim_end().to_string()
+            })
+            .collect();
+
+        while lines.first().is_some_and(|line| line.trim().is_empty()) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
+
+        lines.join("\n")
+    }
+
+    #[tokio::test]
+    async fn project_navigator_popup_snapshot() {
+        let mut app = make_test_app().await;
+        let current_thread_id = ThreadId::new();
+        let sibling_thread_id = ThreadId::new();
+        let current_cwd = PathBuf::from("/workspace/codex");
+
+        app.chat_widget.handle_codex_event(Event {
+            id: String::new(),
+            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                session_id: current_thread_id,
+                forked_from_id: None,
+                thread_name: None,
+                model: "gpt-test".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                cwd: current_cwd.clone(),
+                reasoning_effort: None,
+                history_log_id: 0,
+                history_entry_count: 0,
+                initial_messages: None,
+                network_proxy: None,
+                rollout_path: Some(PathBuf::new()),
+            }),
+        });
+        app.thread_event_channels
+            .insert(current_thread_id, ThreadEventChannel::new(1));
+        app.thread_event_channels
+            .insert(sibling_thread_id, ThreadEventChannel::new(1));
+        app.project_navigation
+            .remember_project_thread(current_thread_id, current_cwd);
+        app.project_navigation.insert_project_thread(
+            sibling_thread_id,
+            PathBuf::from("/workspace/dragonfly"),
+            Some(current_thread_id),
+            NewTabPlacement::Right,
+        );
+        app.project_navigation
+            .add_favorite(PathBuf::from("/workspace/flagship"));
+        app.project_navigation
+            .record_recent(PathBuf::from("/workspace/citadel"));
+        app.active_thread_id = Some(current_thread_id);
+
+        app.open_project_navigator();
+
+        let mut popup = render_bottom_popup(&app.chat_widget, 90);
+        if let Some(projects_root) = preferred_projects_root() {
+            popup = popup.replace(&projects_root.display().to_string(), "<PROJECTS>");
+        }
+        assert_snapshot!("project_navigator_popup", popup);
+    }
+
+    #[tokio::test]
+    async fn project_navigator_popup_wraps_tiles_when_narrow() {
+        let mut app = make_test_app().await;
+        let current_thread_id = ThreadId::new();
+        let sibling_thread_ids = [ThreadId::new(), ThreadId::new(), ThreadId::new()];
+        let current_cwd = PathBuf::from("/workspace/codex");
+
+        app.chat_widget.handle_codex_event(Event {
+            id: String::new(),
+            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                session_id: current_thread_id,
+                forked_from_id: None,
+                thread_name: None,
+                model: "gpt-test".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                cwd: current_cwd.clone(),
+                reasoning_effort: None,
+                history_log_id: 0,
+                history_entry_count: 0,
+                initial_messages: None,
+                network_proxy: None,
+                rollout_path: Some(PathBuf::new()),
+            }),
+        });
+        app.thread_event_channels
+            .insert(current_thread_id, ThreadEventChannel::new(1));
+        for thread_id in sibling_thread_ids {
+            app.thread_event_channels
+                .insert(thread_id, ThreadEventChannel::new(1));
+        }
+        app.project_navigation
+            .remember_project_thread(current_thread_id, current_cwd);
+        for (thread_id, cwd) in sibling_thread_ids.into_iter().zip([
+            PathBuf::from("/workspace/dragonfly"),
+            PathBuf::from("/workspace/riff-connect"),
+            PathBuf::from("/workspace/obsidian"),
+        ]) {
+            app.project_navigation.insert_project_thread(
+                thread_id,
+                cwd,
+                Some(current_thread_id),
+                NewTabPlacement::Right,
+            );
+        }
+        for favorite in [
+            PathBuf::from("/workspace/flagship"),
+            PathBuf::from("/workspace/citadel"),
+            PathBuf::from("/workspace/nevercluster"),
+        ] {
+            app.project_navigation.add_favorite(favorite);
+        }
+        app.active_thread_id = Some(current_thread_id);
+
+        app.open_project_navigator();
+
+        let popup = render_bottom_popup(&app.chat_widget, 60);
+        assert_snapshot!("project_navigator_popup_narrow_wrap", popup);
+    }
+
+    #[tokio::test]
+    async fn project_directory_browser_popup_snapshot() -> Result<()> {
+        let root = tempdir()?;
+        let root_path = root.path().join("projects");
+        std::fs::create_dir_all(root_path.join("codex"))?;
+        std::fs::create_dir_all(root_path.join("dragonfly"))?;
+        std::fs::create_dir_all(root_path.join("nevercluster"))?;
+
+        let mut app = make_test_app().await;
+        app.project_navigation.add_favorite(root_path.clone());
+        app.open_project_directory_browser(root_path.clone());
+
+        let popup = render_bottom_popup(&app.chat_widget, 90)
+            .replace(&root_path.display().to_string(), "<ROOT>")
+            .replace(&root.path().display().to_string(), "<TMP>");
+        assert_snapshot!("project_directory_browser_popup", popup);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn clear_ui_after_long_transcript_snapshots_fresh_header_only() {
         let rendered = render_clear_ui_header_after_long_transcript_for_snapshot().await;
         assert_snapshot!("clear_ui_after_long_transcript_fresh_header_only", rendered);
+    }
+
+    #[tokio::test]
+    async fn context_switch_clear_clears_full_visible_screen() -> Result<()> {
+        use std::io::Write as _;
+
+        let terminal = crate::custom_terminal::Terminal::with_options(VT100Backend::new(24, 8))?;
+        let mut terminal = terminal;
+        terminal.set_viewport_area(Rect::new(0, 3, 24, 3));
+
+        write!(
+            terminal.backend_mut(),
+            "\x1b[HSTALE HEADER\r\nOLD PROJECT\r\nLEFTOVERS"
+        )?;
+        terminal.backend_mut().flush()?;
+
+        clear_terminal_for_context_switch(&mut terminal, false)?;
+
+        let screen = format!("{}", terminal.backend());
+        assert!(
+            !screen.contains("STALE HEADER"),
+            "expected full-screen clear to remove stale content, got:\n{screen}"
+        );
+        assert_eq!(terminal.viewport_area.y, 0);
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -5871,11 +6973,14 @@ mod tests {
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
+            project_navigation: ProjectNavigationState::default(),
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
+            last_user_input_at: Instant::now(),
+            last_attention_switch_at: None,
             #[cfg(feature = "voice-input")]
             handy_gamepad: HandyGamepadState::default(),
         }
@@ -5933,11 +7038,14 @@ mod tests {
                 thread_event_channels: HashMap::new(),
                 thread_event_listener_tasks: HashMap::new(),
                 agent_navigation: AgentNavigationState::default(),
+                project_navigation: ProjectNavigationState::default(),
                 active_thread_id: None,
                 active_thread_rx: None,
                 primary_thread_id: None,
                 primary_session_configured: None,
                 pending_primary_events: VecDeque::new(),
+                last_user_input_at: Instant::now(),
+                last_attention_switch_at: None,
                 #[cfg(all(target_os = "linux", feature = "voice-input"))]
                 handy_gamepad: HandyGamepadState::default(),
             },

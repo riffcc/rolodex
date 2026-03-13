@@ -181,6 +181,56 @@ where
     Ok(())
 }
 
+pub(crate) fn render_pinned_line<B>(
+    terminal: &mut crate::custom_terminal::Terminal<B>,
+    row: u16,
+    line: Option<Line<'static>>,
+) -> io::Result<()>
+where
+    B: Backend + Write,
+{
+    let screen_size = terminal.backend().size().unwrap_or(Size::new(0, 0));
+    if row >= screen_size.height {
+        return Ok(());
+    }
+
+    let writer = terminal.backend_mut();
+    queue!(
+        writer,
+        SavePosition,
+        MoveTo(0, row),
+        Clear(ClearType::UntilNewLine)
+    )?;
+
+    if let Some(line) = line {
+        queue!(
+            writer,
+            SetColors(Colors::new(
+                line.style
+                    .fg
+                    .map(std::convert::Into::into)
+                    .unwrap_or(CColor::Reset),
+                line.style
+                    .bg
+                    .map(std::convert::Into::into)
+                    .unwrap_or(CColor::Reset)
+            ))
+        )?;
+        let merged_spans: Vec<Span> = line
+            .spans
+            .iter()
+            .map(|span| Span {
+                style: span.style.patch(line.style),
+                content: span.content.clone(),
+            })
+            .collect();
+        write_spans(writer, merged_spans.iter())?;
+    }
+
+    queue!(writer, RestorePosition)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetScrollRegion(pub std::ops::Range<u16>);
 
@@ -334,8 +384,10 @@ mod tests {
     use super::*;
     use crate::markdown_render::render_markdown_text;
     use crate::test_backend::VT100Backend;
+    use ratatui::layout::Position;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
+    use ratatui::style::Stylize;
 
     #[test]
     fn writes_bold_then_regular_spans() {
@@ -732,5 +784,64 @@ mod tests {
             url_row <= prompt_row + 2,
             "expected URL content to appear immediately after prompt (allowing at most one spacer row), got prompt_row={prompt_row}, url_row={url_row}, rows={rows:?}",
         );
+    }
+
+    #[test]
+    fn render_pinned_line_writes_to_top_row_and_restores_cursor() {
+        let backend = VT100Backend::new(24, 4);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        term.set_viewport_area(Rect::new(0, 1, 24, 3));
+        term.backend_mut()
+            .set_cursor_position(Position { x: 7, y: 3 })
+            .expect("cursor position");
+        let initial_cursor = term
+            .backend_mut()
+            .get_cursor_position()
+            .expect("cursor position");
+
+        render_pinned_line(
+            &mut term,
+            0,
+            Some(Line::from(vec!["obsidian".into(), " //".dim()])),
+        )
+        .expect("render pinned line");
+
+        let cursor = term
+            .backend_mut()
+            .get_cursor_position()
+            .expect("cursor position");
+        assert_eq!(cursor, initial_cursor);
+
+        let first_row = term
+            .backend()
+            .vt100()
+            .screen()
+            .rows(0, 24)
+            .next()
+            .expect("first row should exist")
+            .trim_end()
+            .to_string();
+        assert_eq!(first_row, "obsidian //");
+    }
+
+    #[test]
+    fn render_pinned_line_clears_previous_contents_when_hidden() {
+        let backend = VT100Backend::new(24, 4);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+
+        render_pinned_line(&mut term, 0, Some(Line::from("workspace 1/2")))
+            .expect("render pinned line");
+        render_pinned_line(&mut term, 0, None).expect("clear pinned line");
+
+        let first_row = term
+            .backend()
+            .vt100()
+            .screen()
+            .rows(0, 24)
+            .next()
+            .expect("first row should exist")
+            .trim_end()
+            .to_string();
+        assert_eq!(first_row, "");
     }
 }

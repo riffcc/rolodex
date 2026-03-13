@@ -18,6 +18,7 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_utils_approval_presets::ApprovalPreset;
 
+use crate::app::AttentionMode;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::history_cell::HistoryCell;
@@ -72,6 +73,36 @@ pub(crate) enum AppEvent {
     CodexEvent(Event),
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
+    /// Open the directory browser rooted at the provided path.
+    OpenProjectDirectoryBrowser {
+        root: PathBuf,
+    },
+    /// Focus an existing project tab for the cwd or open it as a new tab.
+    FocusOrOpenProject {
+        cwd: PathBuf,
+    },
+    /// Add or remove the provided cwd from persisted favorites.
+    ToggleFavoriteProject {
+        cwd: PathBuf,
+    },
+    /// Open the persisted favorites file in the user's editor.
+    EditProjectFavorites,
+    /// Open the controller-native favorites manager.
+    OpenProjectFavoritesManager {
+        initial_path: Option<PathBuf>,
+    },
+    /// Remove the provided cwd from persisted recent projects.
+    ForgetRecentProject {
+        cwd: PathBuf,
+    },
+    /// Toggle automatic attention-driven project switching.
+    SetAttentionMode {
+        mode: AttentionMode,
+    },
+    /// Close the selected project tab.
+    CloseProjectTab {
+        thread_id: ThreadId,
+    },
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
 
@@ -96,6 +127,9 @@ pub(crate) enum AppEvent {
 
     /// Open the resume picker inside the running TUI session.
     OpenResumePicker,
+
+    /// Save the current multi-workspace project session bundle and exit.
+    SaveWorkspaceAndExit,
 
     /// Fork the current session into a new thread.
     ForkCurrentSession,

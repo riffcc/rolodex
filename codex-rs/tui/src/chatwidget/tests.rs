@@ -1903,6 +1903,7 @@ async fn make_chatwidget_manual(
         external_editor_state: ExternalEditorState::Closed,
         realtime_conversation: RealtimeConversationUiState::default(),
         last_rendered_user_message_event: None,
+        project_tabs: ProjectTabsBar::default(),
     };
     widget.set_model(&resolved_model);
     (widget, rx, op_rx)

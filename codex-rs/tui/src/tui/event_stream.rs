@@ -50,6 +50,8 @@ const GAMEPAD_MIN_REPEAT_INTERVAL: Duration = Duration::from_millis(60);
 const GAMEPAD_MAX_REPEAT_INTERVAL: Duration = Duration::from_millis(180);
 const STICK_DEADZONE: f32 = 0.45;
 const TRIGGER_DEADZONE: f32 = 0.55;
+const SHOULDER_NEW_TAB_HOLD_DURATION: Duration = Duration::from_secs(2);
+const SHOULDER_NEW_TAB_PRESS_WINDOW: Duration = Duration::from_millis(1500);
 
 /// Result type produced by an event source.
 pub type EventResult = std::io::Result<Event>;
@@ -378,24 +380,21 @@ fn run_gamepad_event_loop(tx: mpsc::UnboundedSender<TuiEvent>) {
 struct GamepadState {
     left_x: f32,
     left_y: f32,
-    left_trigger_axis: f32,
     right_trigger_axis: f32,
     dpad_up: bool,
     dpad_down: bool,
     dpad_left: bool,
     dpad_right: bool,
-    focus_prev_button: bool,
+    left_shoulder_pressed_at: Option<Instant>,
+    right_shoulder_pressed_at: Option<Instant>,
+    left_new_tab_armed_until: Option<Instant>,
+    right_new_tab_armed_until: Option<Instant>,
     focus_next_button: bool,
-    page_prev_button: bool,
-    page_next_button: bool,
     repeat_up: RepeatState,
     repeat_down: RepeatState,
     repeat_left: RepeatState,
     repeat_right: RepeatState,
-    repeat_focus_prev: RepeatState,
     repeat_focus_next: RepeatState,
-    repeat_page_prev: RepeatState,
-    repeat_page_next: RepeatState,
 }
 
 #[derive(Default)]
@@ -443,15 +442,45 @@ impl GamepadState {
     }
 
     fn set_button(&mut self, button: Button, pressed: bool, tx: &mpsc::UnboundedSender<TuiEvent>) {
+        let now = Instant::now();
         match button {
             Button::DPadUp => self.dpad_up = pressed,
             Button::DPadDown => self.dpad_down = pressed,
             Button::DPadLeft => self.dpad_left = pressed,
             Button::DPadRight => self.dpad_right = pressed,
-            Button::LeftTrigger => self.page_prev_button = pressed,
-            Button::RightTrigger => self.page_next_button = pressed,
-            Button::LeftTrigger2 => self.focus_prev_button = pressed,
+            Button::LeftTrigger => {
+                Self::handle_shoulder_button(
+                    pressed,
+                    &mut self.left_shoulder_pressed_at,
+                    &mut self.left_new_tab_armed_until,
+                    tx,
+                    GamepadAction::ProjectTabPrevious,
+                    GamepadAction::ProjectNewTabLeft,
+                    now,
+                );
+            }
+            Button::RightTrigger => {
+                Self::handle_shoulder_button(
+                    pressed,
+                    &mut self.right_shoulder_pressed_at,
+                    &mut self.right_new_tab_armed_until,
+                    tx,
+                    GamepadAction::ProjectTabNext,
+                    GamepadAction::ProjectNewTabRight,
+                    now,
+                );
+            }
+            Button::LeftTrigger2 => {}
             Button::RightTrigger2 => self.focus_next_button = pressed,
+            Button::Start | Button::Mode if pressed => {
+                let _ = tx.send(TuiEvent::Gamepad(GamepadAction::OpenProjectNavigator));
+            }
+            Button::LeftThumb if pressed => {
+                let _ = tx.send(TuiEvent::Gamepad(GamepadAction::ProjectWorkspacePrevious));
+            }
+            Button::RightThumb if pressed => {
+                let _ = tx.send(TuiEvent::Gamepad(GamepadAction::ProjectWorkspaceNext));
+            }
             Button::South if pressed => {
                 let _ = tx.send(TuiEvent::Gamepad(GamepadAction::Confirm));
             }
@@ -475,11 +504,38 @@ impl GamepadState {
         }
     }
 
+    fn handle_shoulder_button(
+        pressed: bool,
+        pressed_at: &mut Option<Instant>,
+        armed_until: &mut Option<Instant>,
+        tx: &mpsc::UnboundedSender<TuiEvent>,
+        switch_action: GamepadAction,
+        new_tab_action: GamepadAction,
+        now: Instant,
+    ) {
+        if pressed {
+            if armed_until.is_some_and(|armed| armed >= now) {
+                *armed_until = None;
+                let _ = tx.send(TuiEvent::Gamepad(new_tab_action));
+                return;
+            }
+            *armed_until = None;
+            *pressed_at = Some(now);
+            let _ = tx.send(TuiEvent::Gamepad(switch_action));
+            return;
+        }
+
+        if pressed_at.take().is_some_and(|started| {
+            now.saturating_duration_since(started) >= SHOULDER_NEW_TAB_HOLD_DURATION
+        }) {
+            *armed_until = Some(now + SHOULDER_NEW_TAB_PRESS_WINDOW);
+        }
+    }
+
     fn set_axis(&mut self, axis: Axis, value: f32) {
         match axis {
             Axis::LeftStickX => self.left_x = value,
             Axis::LeftStickY => self.left_y = value,
-            Axis::LeftZ => self.left_trigger_axis = normalize_trigger(value),
             Axis::RightZ => self.right_trigger_axis = normalize_trigger(value),
             _ => {}
         }
@@ -487,19 +543,26 @@ impl GamepadState {
 
     fn emit_repeats(&mut self, tx: &mpsc::UnboundedSender<TuiEvent>) {
         let now = Instant::now();
+        if self
+            .left_new_tab_armed_until
+            .is_some_and(|armed_until| armed_until < now)
+        {
+            self.left_new_tab_armed_until = None;
+        }
+        if self
+            .right_new_tab_armed_until
+            .is_some_and(|armed_until| armed_until < now)
+        {
+            self.right_new_tab_armed_until = None;
+        }
 
         let left_strength = axis_strength(self.left_x, false);
         let right_strength = axis_strength(self.left_x, true);
         let up_strength = axis_strength(-self.left_y, true);
         let down_strength = axis_strength(self.left_y, true);
-        let focus_prev_strength =
-            self.left_trigger_axis
-                .max(if self.focus_prev_button { 1.0 } else { 0.0 });
         let focus_next_strength =
             self.right_trigger_axis
                 .max(if self.focus_next_button { 1.0 } else { 0.0 });
-        let page_prev_strength = if self.page_prev_button { 1.0 } else { 0.0 };
-        let page_next_strength = if self.page_next_button { 1.0 } else { 0.0 };
 
         self.repeat_up.tick(
             self.dpad_up || up_strength > 0.0,
@@ -529,32 +592,11 @@ impl GamepadState {
             TuiEvent::Gamepad(GamepadAction::Right),
             now,
         );
-        self.repeat_focus_prev.tick(
-            focus_prev_strength > TRIGGER_DEADZONE,
-            focus_prev_strength,
-            tx,
-            TuiEvent::Gamepad(GamepadAction::FocusPrevious),
-            now,
-        );
         self.repeat_focus_next.tick(
             focus_next_strength > TRIGGER_DEADZONE,
             focus_next_strength,
             tx,
             TuiEvent::Gamepad(GamepadAction::FocusNext),
-            now,
-        );
-        self.repeat_page_prev.tick(
-            page_prev_strength > 0.0,
-            page_prev_strength,
-            tx,
-            TuiEvent::Gamepad(GamepadAction::PreviousPage),
-            now,
-        );
-        self.repeat_page_next.tick(
-            page_next_strength > 0.0,
-            page_next_strength,
-            tx,
-            TuiEvent::Gamepad(GamepadAction::NextPage),
             now,
         );
     }
@@ -739,6 +781,34 @@ mod tests {
 
         let next = stream.next().await.unwrap();
         assert!(matches!(next, TuiEvent::Gamepad(GamepadAction::Context)));
+    }
+
+    #[test]
+    fn left_trigger_is_unmapped() {
+        let mut state = GamepadState::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        state.set_button(Button::LeftTrigger2, true, &tx);
+        state.set_axis(Axis::LeftZ, 1.0);
+        state.emit_repeats(&tx);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn mode_button_opens_project_navigator() {
+        let mut state = GamepadState::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        state.set_button(Button::Mode, true, &tx);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TuiEvent::Gamepad(GamepadAction::OpenProjectNavigator))
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

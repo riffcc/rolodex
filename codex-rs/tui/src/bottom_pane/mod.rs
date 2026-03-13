@@ -105,6 +105,7 @@ mod paste_burst;
 mod pending_input_preview;
 mod pending_thread_approvals;
 pub mod popup_consts;
+mod project_switcher;
 mod scroll_state;
 mod selection_popup_common;
 mod textarea;
@@ -150,6 +151,10 @@ pub(crate) use experimental_features_view::ExperimentalFeatureItem;
 pub(crate) use experimental_features_view::ExperimentalFeaturesView;
 pub(crate) use list_selection_view::SelectionAction;
 pub(crate) use list_selection_view::SelectionItem;
+pub(crate) use project_switcher::FavoriteProjectTile;
+pub(crate) use project_switcher::FavoritesEditorView;
+pub(crate) use project_switcher::ProjectSwitcherTabTile;
+pub(crate) use project_switcher::ProjectSwitcherView;
 
 /// Pane displayed in the lower half of the chat UI.
 ///
@@ -790,6 +795,10 @@ impl BottomPane {
     pub(crate) fn show_selection_view(&mut self, params: list_selection_view::SelectionViewParams) {
         let view = list_selection_view::ListSelectionView::new(params, self.app_event_tx.clone());
         self.push_view(Box::new(view));
+    }
+
+    pub(crate) fn show_custom_view(&mut self, view: Box<dyn BottomPaneView>) {
+        self.push_view(view);
     }
 
     pub(crate) fn replace_view_if_active(

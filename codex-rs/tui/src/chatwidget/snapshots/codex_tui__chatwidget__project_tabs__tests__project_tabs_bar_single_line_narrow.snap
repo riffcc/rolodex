@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/project_tabs.rs
+assertion_line: 240
+expression: "render_tabs_bar(sample_state(), 48)"
+---
+obsidian│? riff-c… /A/ workspace 1/3 (Riff Labs)

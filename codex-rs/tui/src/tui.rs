@@ -32,6 +32,7 @@ use ratatui::crossterm::terminal::disable_raw_mode;
 use ratatui::crossterm::terminal::enable_raw_mode;
 use ratatui::layout::Offset;
 use ratatui::layout::Rect;
+use ratatui::layout::Size;
 use ratatui::text::Line;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
@@ -237,14 +238,20 @@ pub enum GamepadAction {
     Down,
     Left,
     Right,
+    OpenProjectNavigator,
     Confirm,
     Submit,
     Cancel,
     Context,
     Alternate,
+    ProjectTabPrevious,
+    ProjectTabNext,
+    ProjectNewTabLeft,
+    ProjectNewTabRight,
+    ProjectWorkspacePrevious,
+    ProjectWorkspaceNext,
     PreviousPage,
     NextPage,
-    FocusPrevious,
     FocusNext,
     PushToTalkStart,
     PushToTalkStop,
@@ -263,6 +270,7 @@ pub struct Tui {
     draw_tx: broadcast::Sender<()>,
     event_broker: Arc<EventBroker>,
     pub(crate) terminal: Terminal,
+    top_bar_line: Option<Line<'static>>,
     pending_history_lines: Vec<Line<'static>>,
     alt_saved_viewport: Option<ratatui::layout::Rect>,
     #[cfg(unix)]
@@ -275,6 +283,25 @@ pub struct Tui {
     notification_backend: Option<DesktopNotificationBackend>,
     // When false, enter_alt_screen() becomes a no-op (for Zellij scrollback support)
     alt_screen_enabled: bool,
+}
+
+fn target_viewport_area(
+    current_area: Rect,
+    screen_size: Size,
+    desired_height: u16,
+    pinned_top_rows: u16,
+    alt_screen_active: bool,
+) -> Rect {
+    let mut area = current_area;
+    let top = if alt_screen_active {
+        pinned_top_rows
+    } else {
+        area.y.max(pinned_top_rows)
+    };
+    area.y = top;
+    area.height = desired_height.min(screen_size.height.saturating_sub(pinned_top_rows));
+    area.width = screen_size.width;
+    area
 }
 
 impl Tui {
@@ -294,6 +321,7 @@ impl Tui {
             draw_tx,
             event_broker: Arc::new(EventBroker::new()),
             terminal,
+            top_bar_line: None,
             pending_history_lines: vec![],
             alt_saved_viewport: None,
             #[cfg(unix)]
@@ -317,6 +345,10 @@ impl Tui {
 
     pub fn frame_requester(&self) -> FrameRequester {
         self.frame_requester.clone()
+    }
+
+    pub fn set_top_bar_line(&mut self, line: Option<Line<'static>>) {
+        self.top_bar_line = line;
     }
 
     pub fn enhanced_keys_supported(&self) -> bool {
@@ -498,10 +530,14 @@ impl Tui {
             }
 
             let size = terminal.size()?;
-
-            let mut area = terminal.viewport_area;
-            area.height = height.min(size.height);
-            area.width = size.width;
+            let pinned_top_rows = u16::from(self.top_bar_line.is_some());
+            let mut area = target_viewport_area(
+                terminal.viewport_area,
+                size,
+                height,
+                pinned_top_rows,
+                self.alt_screen_active.load(Ordering::Relaxed),
+            );
             // If the viewport has expanded, scroll everything else up to make room.
             if area.bottom() > size.height {
                 terminal
@@ -538,7 +574,8 @@ impl Tui {
 
             terminal.draw(|frame| {
                 draw_fn(frame);
-            })
+            })?;
+            crate::insert_history::render_pinned_line(terminal, 0, self.top_bar_line.clone())
         })?
     }
 
@@ -562,5 +599,29 @@ impl Tui {
             }
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::target_viewport_area;
+    use pretty_assertions::assert_eq;
+    use ratatui::layout::Rect;
+    use ratatui::layout::Size;
+
+    #[test]
+    fn target_viewport_area_expands_inline_viewport_upward() {
+        assert_eq!(
+            target_viewport_area(Rect::new(0, 7, 80, 3), Size::new(80, 10), 6, 0, false),
+            Rect::new(0, 7, 80, 6)
+        );
+    }
+
+    #[test]
+    fn target_viewport_area_reserves_top_row_for_pinned_bar() {
+        assert_eq!(
+            target_viewport_area(Rect::new(0, 0, 80, 0), Size::new(80, 10), 10, 1, false),
+            Rect::new(0, 1, 80, 9)
+        );
     }
 }

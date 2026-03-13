@@ -7,6 +7,7 @@ use additional_dirs::add_dir_warning_message;
 use app::App;
 pub use app::AppExitInfo;
 pub use app::ExitReason;
+use app::ProjectNavigationState;
 use codex_cloud_requirements::cloud_requirements_loader;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
@@ -822,19 +823,25 @@ async fn run_ratatui_app(
             _ => resume_picker::SessionSelection::StartFresh,
         }
     } else if cli.resume_picker {
-        match resume_picker::run_resume_picker(&mut tui, &config, cli.resume_show_all).await? {
-            resume_picker::SessionSelection::Exit => {
-                restore();
-                session_log::log_session_end();
-                return Ok(AppExitInfo {
-                    token_usage: codex_protocol::protocol::TokenUsage::default(),
-                    thread_id: None,
-                    thread_name: None,
-                    update_action: None,
-                    exit_reason: ExitReason::UserRequested,
-                });
+        if cli.resume_show_all
+            && let Some(selection) = load_saved_workspace_resume_selection(&config).await?
+        {
+            selection
+        } else {
+            match resume_picker::run_resume_picker(&mut tui, &config, cli.resume_show_all).await? {
+                resume_picker::SessionSelection::Exit => {
+                    restore();
+                    session_log::log_session_end();
+                    return Ok(AppExitInfo {
+                        token_usage: codex_protocol::protocol::TokenUsage::default(),
+                        thread_id: None,
+                        thread_name: None,
+                        update_action: None,
+                        exit_reason: ExitReason::UserRequested,
+                    });
+                }
+                other => other,
             }
-            other => other,
         }
     } else {
         resume_picker::SessionSelection::StartFresh
@@ -845,6 +852,9 @@ async fn run_ratatui_app(
     let action_and_target_session_if_resume_or_fork = match &session_selection {
         resume_picker::SessionSelection::Resume(target_session) => {
             Some((CwdPromptAction::Resume, target_session))
+        }
+        resume_picker::SessionSelection::ResumeWorkspace(target_session) => {
+            Some((CwdPromptAction::Resume, &target_session.active_session))
         }
         resume_picker::SessionSelection::Fork(target_session) => {
             Some((CwdPromptAction::Fork, target_session))
@@ -882,7 +892,9 @@ async fn run_ratatui_app(
     };
 
     let mut config = match &session_selection {
-        resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_) => {
+        resume_picker::SessionSelection::Resume(_)
+        | resume_picker::SessionSelection::ResumeWorkspace(_)
+        | resume_picker::SessionSelection::Fork(_) => {
             load_config_or_exit_with_fallback_cwd(
                 cli_kv_overrides.clone(),
                 overrides.clone(),
@@ -955,6 +967,33 @@ pub(crate) async fn resolve_session_thread_id(
             .ok()
             .map(|meta_line| meta_line.meta.id),
     }
+}
+
+async fn load_saved_workspace_resume_selection(
+    config: &Config,
+) -> std::io::Result<Option<resume_picker::SessionSelection>> {
+    let Some(session) = ProjectNavigationState::load_saved_workspace_session(&config.codex_home)?
+    else {
+        return Ok(None);
+    };
+    let Some(startup_tab) = session.startup_tab().cloned() else {
+        return Ok(None);
+    };
+    let Some(path) =
+        find_thread_path_by_id_str(&config.codex_home, &startup_tab.thread_id.to_string()).await?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(resume_picker::SessionSelection::ResumeWorkspace(
+        resume_picker::WorkspaceSessionTarget {
+            active_session: resume_picker::SessionTarget {
+                path,
+                thread_id: startup_tab.thread_id,
+            },
+            session,
+        },
+    )))
 }
 
 pub(crate) async fn read_session_cwd(

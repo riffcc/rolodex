@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::app::PersistedWorkspaceSession;
 use crate::diff_render::display_path_for;
 use crate::key_hint;
 use crate::text_formatting::truncate_text;
@@ -50,8 +51,15 @@ pub struct SessionTarget {
 pub enum SessionSelection {
     StartFresh,
     Resume(SessionTarget),
+    ResumeWorkspace(WorkspaceSessionTarget),
     Fork(SessionTarget),
     Exit,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceSessionTarget {
+    pub active_session: SessionTarget,
+    pub session: PersistedWorkspaceSession,
 }
 
 #[derive(Clone, Copy, Debug)]

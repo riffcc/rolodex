@@ -24,6 +24,12 @@ pub(crate) trait BottomPaneView: Renderable {
         None
     }
 
+    /// Actual item index for list-based views that want to preserve selection
+    /// across external refreshes.
+    fn selected_index(&self) -> Option<usize> {
+        None
+    }
+
     /// Optionally override how the active view wants a gamepad action mapped.
     fn map_gamepad_action(&self, _action: GamepadAction) -> Option<KeyCode> {
         None

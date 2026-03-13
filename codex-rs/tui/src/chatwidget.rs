@@ -221,6 +221,7 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
+use crate::bottom_pane::BottomPaneView;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::CollaborationModeIndicator;
 use crate::bottom_pane::ColumnWidthMode;
@@ -278,6 +279,11 @@ use self::agent::spawn_agent_from_existing;
 pub(crate) use self::agent::spawn_op_forwarder;
 mod session_header;
 use self::session_header::SessionHeader;
+mod project_tabs;
+pub(crate) use self::project_tabs::ProjectAttentionLevel;
+pub(crate) use self::project_tabs::ProjectTabChromeEntry;
+pub(crate) use self::project_tabs::ProjectTabsBar;
+pub(crate) use self::project_tabs::ProjectTabsChromeState;
 mod skills;
 use self::skills::collect_tool_mentions;
 use self::skills::find_app_mentions;
@@ -569,6 +575,7 @@ pub(crate) struct ChatWidget {
     models_manager: Arc<ModelsManager>,
     session_telemetry: SessionTelemetry,
     session_header: SessionHeader,
+    project_tabs: ProjectTabsBar,
     initial_user_message: Option<UserMessage>,
     token_info: Option<TokenUsageInfo>,
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
@@ -3324,6 +3331,7 @@ impl ChatWidget {
             models_manager,
             session_telemetry,
             session_header: SessionHeader::new(header_model),
+            project_tabs: ProjectTabsBar::default(),
             initial_user_message,
             token_info: None,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
@@ -3511,6 +3519,7 @@ impl ChatWidget {
             models_manager,
             session_telemetry,
             session_header: SessionHeader::new(header_model),
+            project_tabs: ProjectTabsBar::default(),
             initial_user_message,
             token_info: None,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
@@ -3690,6 +3699,7 @@ impl ChatWidget {
             models_manager,
             session_telemetry,
             session_header: SessionHeader::new(header_model),
+            project_tabs: ProjectTabsBar::default(),
             initial_user_message,
             token_info: None,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
@@ -4010,6 +4020,11 @@ impl ChatWidget {
 
     pub(crate) fn show_selection_view(&mut self, params: SelectionViewParams) {
         self.bottom_pane.show_selection_view(params);
+        self.request_redraw();
+    }
+
+    pub(crate) fn show_custom_view(&mut self, view: Box<dyn BottomPaneView>) {
+        self.bottom_pane.show_custom_view(view);
         self.request_redraw();
     }
 
@@ -8986,6 +9001,15 @@ impl ChatWidget {
     pub(crate) fn update_voice_visualizer(&mut self, visualizer: Option<String>) {
         self.bottom_pane.update_voice_visualizer(visualizer);
         self.request_redraw();
+    }
+
+    pub(crate) fn set_project_tabs(&mut self, state: Option<ProjectTabsChromeState>) {
+        self.project_tabs.set_state(state);
+        self.request_redraw();
+    }
+
+    pub(crate) fn project_tabs_line(&self, width: u16) -> Option<Line<'static>> {
+        self.project_tabs.render_line_for_width(width)
     }
 }
 
