@@ -31,6 +31,8 @@ use codex_protocol::protocol::NetworkApprovalContext;
 use codex_protocol::protocol::NetworkPolicyRuleAction;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::request_permissions::PermissionGrantScope;
+use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -70,6 +72,13 @@ pub(crate) enum ApprovalRequest {
         cwd: PathBuf,
         changes: HashMap<PathBuf, FileChange>,
     },
+    Permissions {
+        thread_id: ThreadId,
+        thread_label: Option<String>,
+        call_id: String,
+        reason: Option<String>,
+        permissions: PermissionProfile,
+    },
     McpElicitation {
         thread_id: ThreadId,
         thread_label: Option<String>,
@@ -84,6 +93,7 @@ impl ApprovalRequest {
         match self {
             ApprovalRequest::Exec { thread_id, .. }
             | ApprovalRequest::ApplyPatch { thread_id, .. }
+            | ApprovalRequest::Permissions { thread_id, .. }
             | ApprovalRequest::McpElicitation { thread_id, .. } => *thread_id,
         }
     }
@@ -92,6 +102,7 @@ impl ApprovalRequest {
         match self {
             ApprovalRequest::Exec { thread_label, .. }
             | ApprovalRequest::ApplyPatch { thread_label, .. }
+            | ApprovalRequest::Permissions { thread_label, .. }
             | ApprovalRequest::McpElicitation { thread_label, .. } => thread_label.as_deref(),
         }
     }
@@ -185,6 +196,10 @@ impl ApprovalOverlay {
                 patch_options(),
                 "Would you like to make the following edits?".to_string(),
             ),
+            ApprovalRequest::Permissions { .. } => (
+                Vec::new(),
+                "Codex needs additional permissions.".to_string(),
+            ),
             ApprovalRequest::McpElicitation { server_name, .. } => (
                 elicitation_options(),
                 format!("{server_name} needs your approval."),
@@ -237,6 +252,13 @@ impl ApprovalOverlay {
                 (ApprovalRequest::ApplyPatch { id, .. }, ApprovalDecision::Review(decision)) => {
                     self.handle_patch_decision(id, decision.clone());
                 }
+                (ApprovalRequest::Permissions { call_id, .. }, ApprovalDecision::Review(_)) => {
+                    self.handle_permissions_decision(
+                        call_id,
+                        PermissionProfile::default(),
+                        PermissionGrantScope::Turn,
+                    );
+                }
                 (
                     ApprovalRequest::McpElicitation {
                         server_name,
@@ -287,6 +309,28 @@ impl ApprovalOverlay {
             op: Op::PatchApproval {
                 id: id.to_string(),
                 decision,
+            },
+        });
+    }
+
+    fn handle_permissions_decision(
+        &self,
+        call_id: &str,
+        permissions: PermissionProfile,
+        scope: PermissionGrantScope,
+    ) {
+        let Some(thread_id) = self
+            .current_request
+            .as_ref()
+            .map(ApprovalRequest::thread_id)
+        else {
+            return;
+        };
+        self.app_event_tx.send(AppEvent::SubmitThreadOp {
+            thread_id,
+            op: Op::RequestPermissionsResponse {
+                id: call_id.to_string(),
+                response: RequestPermissionsResponse { permissions, scope },
             },
         });
     }
@@ -439,6 +483,13 @@ impl BottomPaneView for ApprovalOverlay {
                 ApprovalRequest::ApplyPatch { id, .. } => {
                     self.handle_patch_decision(id, ReviewDecision::Abort);
                 }
+                ApprovalRequest::Permissions { call_id, .. } => {
+                    self.handle_permissions_decision(
+                        call_id,
+                        PermissionProfile::default(),
+                        PermissionGrantScope::Turn,
+                    );
+                }
                 ApprovalRequest::McpElicitation {
                     server_name,
                     request_id,
@@ -582,6 +633,32 @@ fn build_header(request: &ApprovalRequest) -> Box<dyn Renderable> {
             header.push(DiffSummary::new(changes.clone(), cwd.clone()).into());
             Box::new(ColumnRenderable::with(header))
         }
+        ApprovalRequest::Permissions {
+            thread_label,
+            reason,
+            permissions,
+            ..
+        } => {
+            let mut lines = Vec::new();
+            if let Some(thread_label) = thread_label {
+                lines.push(Line::from(vec![
+                    "Thread: ".into(),
+                    thread_label.clone().bold(),
+                ]));
+                lines.push(Line::from(""));
+            }
+            if let Some(reason) = reason {
+                lines.push(Line::from(vec!["Reason: ".into(), reason.clone().italic()]));
+                lines.push(Line::from(""));
+            }
+            if let Some(rule_line) = format_additional_permissions_rule(permissions) {
+                lines.push(Line::from(vec![
+                    "Permission rule: ".into(),
+                    rule_line.cyan(),
+                ]));
+            }
+            Box::new(Paragraph::new(lines).wrap(Wrap { trim: false }))
+        }
         ApprovalRequest::McpElicitation {
             thread_label,
             server_name,
@@ -653,29 +730,47 @@ fn build_permission_picker(
     request: &ApprovalRequest,
     app_event_tx: AppEventSender,
 ) -> Option<MultiSelectPicker> {
-    let ApprovalRequest::Exec {
-        thread_id,
-        thread_label,
-        id,
-        command,
-        available_decisions,
-        additional_permissions,
-        ..
-    } = request
-    else {
-        return None;
+    let (thread_id, thread_label, approval_id, command, requested_permissions) = match request {
+        ApprovalRequest::Exec {
+            thread_id,
+            thread_label,
+            id,
+            command,
+            available_decisions,
+            additional_permissions,
+            ..
+        } => {
+            if !available_decisions.iter().any(|decision| {
+                matches!(
+                    decision,
+                    ReviewDecision::ApprovedAdditionalPermissions { .. }
+                )
+            }) {
+                return None;
+            }
+            (
+                *thread_id,
+                thread_label.clone(),
+                id.clone(),
+                command.clone(),
+                additional_permissions.clone()?,
+            )
+        }
+        ApprovalRequest::Permissions {
+            thread_id,
+            thread_label,
+            call_id,
+            permissions,
+            ..
+        } => (
+            *thread_id,
+            thread_label.clone(),
+            call_id.clone(),
+            Vec::new(),
+            permissions.clone(),
+        ),
+        _ => return None,
     };
-
-    if !available_decisions.iter().any(|decision| {
-        matches!(
-            decision,
-            ReviewDecision::ApprovedAdditionalPermissions { .. }
-        )
-    }) {
-        return None;
-    }
-
-    let requested_permissions = additional_permissions.clone()?;
     let selections = permission_profile_selections(&requested_permissions);
     if selections.is_empty() {
         return None;
@@ -690,15 +785,11 @@ fn build_permission_picker(
             enabled: true,
         })
         .collect::<Vec<_>>();
-    let selection_snapshot = selections.clone();
-    let thread_id = *thread_id;
-    let thread_label = thread_label.clone();
-    let approval_id = id.clone();
-    let command = command.clone();
+    let selection_snapshot = selections;
     let confirm_thread_label = thread_label.clone();
-    let cancel_thread_label = thread_label.clone();
+    let cancel_thread_label = thread_label;
     let confirm_approval_id = approval_id.clone();
-    let cancel_approval_id = approval_id.clone();
+    let cancel_approval_id = approval_id;
     let confirm_command = command.clone();
     let cancel_command = command.clone();
 
@@ -730,44 +821,70 @@ fn build_permission_picker(
         .on_confirm(move |selected_ids, tx| {
             let permission_profile =
                 permission_profile_from_selection_ids(&selection_snapshot, selected_ids);
-            let decision = if permission_profile.is_empty() {
-                ReviewDecision::Denied
+            if command.is_empty() {
+                tx.send(AppEvent::SubmitThreadOp {
+                    thread_id,
+                    op: Op::RequestPermissionsResponse {
+                        id: confirm_approval_id.clone(),
+                        response: RequestPermissionsResponse {
+                            permissions: permission_profile,
+                            scope: PermissionGrantScope::Turn,
+                        },
+                    },
+                });
             } else {
-                ReviewDecision::ApprovedAdditionalPermissions { permission_profile }
-            };
-            if confirm_thread_label.is_none() {
-                let cell = history_cell::new_approval_decision_cell(
-                    confirm_command.clone(),
-                    decision.clone(),
-                );
-                tx.send(AppEvent::InsertHistoryCell(cell));
+                let decision = if permission_profile.is_empty() {
+                    ReviewDecision::Denied
+                } else {
+                    ReviewDecision::ApprovedAdditionalPermissions { permission_profile }
+                };
+                if confirm_thread_label.is_none() {
+                    let cell = history_cell::new_approval_decision_cell(
+                        confirm_command.clone(),
+                        decision.clone(),
+                    );
+                    tx.send(AppEvent::InsertHistoryCell(cell));
+                }
+                tx.send(AppEvent::SubmitThreadOp {
+                    thread_id,
+                    op: Op::ExecApproval {
+                        id: confirm_approval_id.clone(),
+                        turn_id: None,
+                        decision,
+                    },
+                });
             }
-            tx.send(AppEvent::SubmitThreadOp {
-                thread_id,
-                op: Op::ExecApproval {
-                    id: confirm_approval_id.clone(),
-                    turn_id: None,
-                    decision,
-                },
-            });
         })
         .on_cancel(move |tx| {
-            let decision = ReviewDecision::Abort;
-            if cancel_thread_label.is_none() {
-                let cell = history_cell::new_approval_decision_cell(
-                    cancel_command.clone(),
-                    decision.clone(),
-                );
-                tx.send(AppEvent::InsertHistoryCell(cell));
+            if cancel_command.is_empty() {
+                tx.send(AppEvent::SubmitThreadOp {
+                    thread_id,
+                    op: Op::RequestPermissionsResponse {
+                        id: cancel_approval_id.clone(),
+                        response: RequestPermissionsResponse {
+                            permissions: PermissionProfile::default(),
+                            scope: PermissionGrantScope::Turn,
+                        },
+                    },
+                });
+            } else {
+                let decision = ReviewDecision::Abort;
+                if cancel_thread_label.is_none() {
+                    let cell = history_cell::new_approval_decision_cell(
+                        cancel_command.clone(),
+                        decision.clone(),
+                    );
+                    tx.send(AppEvent::InsertHistoryCell(cell));
+                }
+                tx.send(AppEvent::SubmitThreadOp {
+                    thread_id,
+                    op: Op::ExecApproval {
+                        id: cancel_approval_id.clone(),
+                        turn_id: None,
+                        decision,
+                    },
+                });
             }
-            tx.send(AppEvent::SubmitThreadOp {
-                thread_id,
-                op: Op::ExecApproval {
-                    id: cancel_approval_id.clone(),
-                    turn_id: None,
-                    decision,
-                },
-            });
         })
         .build(),
     )
@@ -1064,7 +1181,7 @@ fn exec_options(
         .collect()
 }
 
-fn format_additional_permissions_rule(
+pub(crate) fn format_additional_permissions_rule(
     additional_permissions: &PermissionProfile,
 ) -> Option<String> {
     let mut parts = Vec::new();
@@ -1184,6 +1301,7 @@ mod tests {
     use crate::app_event::AppEvent;
     use codex_protocol::models::FileSystemPermissions;
     use codex_protocol::models::MacOsAutomationPermission;
+    use codex_protocol::models::MacOsContactsPermission;
     use codex_protocol::models::MacOsPreferencesPermission;
     use codex_protocol::models::MacOsSeatbeltProfileExtensions;
     use codex_protocol::models::NetworkPermissions;
@@ -1545,8 +1663,11 @@ mod tests {
                 macos_automation: MacOsAutomationPermission::BundleIds(vec![
                     "com.apple.Notes".to_string(),
                 ]),
+                macos_launch_services: false,
                 macos_accessibility: true,
                 macos_calendar: false,
+                macos_reminders: false,
+                macos_contacts: MacOsContactsPermission::None,
             }),
         };
 
@@ -1569,10 +1690,13 @@ mod tests {
                     write: Some(vec![absolute_path("/tmp/out.txt")]),
                 }),
                 macos: Some(MacOsSeatbeltProfileExtensions {
-                    macos_preferences: MacOsPreferencesPermission::None,
+                    macos_preferences: MacOsPreferencesPermission::ReadOnly,
                     macos_automation: MacOsAutomationPermission::None,
+                    macos_launch_services: false,
                     macos_accessibility: true,
                     macos_calendar: false,
+                    macos_reminders: false,
+                    macos_contacts: MacOsContactsPermission::None,
                 }),
             }
         );
@@ -1739,8 +1863,11 @@ mod tests {
                         "com.apple.Calendar".to_string(),
                         "com.apple.Notes".to_string(),
                     ]),
+                    macos_launch_services: false,
                     macos_accessibility: true,
                     macos_calendar: true,
+                    macos_reminders: false,
+                    macos_contacts: MacOsContactsPermission::None,
                 }),
                 ..Default::default()
             }),
