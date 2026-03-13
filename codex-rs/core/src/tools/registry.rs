@@ -313,10 +313,9 @@ impl ToolRegistry {
                 })?;
                 if generic_transcript_enabled
                     && let ResponseInputItem::FunctionCallOutput { output, .. }
-                    | ResponseInputItem::CustomToolCallOutput { output, .. } =
-                        result
-                            .result
-                            .to_response_item(&call_id_owned, &payload_for_response)
+                    | ResponseInputItem::CustomToolCallOutput { output, .. } = result
+                        .result
+                        .to_response_item(&call_id_owned, &payload_for_response)
                 {
                     invocation
                         .session

@@ -1,9 +1,15 @@
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use codex_utils_string::take_bytes_at_char_boundary;
 use serde::Deserialize;
+use serde::Serialize;
+use tokio::process::Command;
+use tokio::time::timeout;
 
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::FunctionToolOutput;
@@ -17,6 +23,9 @@ pub struct ReadFileHandler;
 
 const MAX_LINE_LENGTH: usize = 500;
 const TAB_WIDTH: usize = 4;
+const DEFAULT_GREP_LIMIT: usize = 100;
+const MAX_GREP_LIMIT: usize = 2000;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 // TODO(jif) add support for block comments
 const COMMENT_PREFIXES: &[&str] = &["#", "//", "--"];
@@ -24,8 +33,9 @@ const COMMENT_PREFIXES: &[&str] = &["#", "//", "--"];
 /// JSON arguments accepted by the `read_file` tool handler.
 #[derive(Deserialize)]
 struct ReadFileArgs {
-    /// Absolute path to the file that will be read.
-    file_path: String,
+    /// Legacy single-read path. Kept for backwards compatibility.
+    #[serde(default)]
+    file_path: Option<String>,
     /// 1-indexed line number to start reading from; defaults to 1.
     #[serde(default = "defaults::offset")]
     offset: usize,
@@ -38,15 +48,112 @@ struct ReadFileArgs {
     /// Optional indentation configuration used when `mode` is `Indentation`.
     #[serde(default)]
     indentation: Option<IndentationArgs>,
+    /// Batched explicit reads.
+    #[serde(default)]
+    reads: Option<Vec<ReadRequest>>,
+    /// Native ripgrep stage for file or match discovery.
+    #[serde(default)]
+    grep: Option<GrepRequest>,
+    /// Ordered pipeline stages that can chain grep and read work together.
+    #[serde(default)]
+    pipeline: Option<Vec<PipelineStep>>,
+    /// High-level investigation presets that can emit persistent maps.
+    #[serde(default)]
+    map: Option<MapRequest>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum ReadMode {
     #[default]
     Slice,
     Indentation,
 }
+
+#[derive(Deserialize, Clone)]
+struct ReadRequest {
+    file_path: String,
+    #[serde(default = "defaults::offset")]
+    offset: usize,
+    #[serde(default = "defaults::limit")]
+    limit: usize,
+    #[serde(default)]
+    mode: ReadMode,
+    #[serde(default)]
+    indentation: Option<IndentationArgs>,
+}
+
+#[derive(Deserialize, Clone)]
+struct GrepRequest {
+    pattern: String,
+    #[serde(default)]
+    include: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default = "defaults::grep_limit")]
+    limit: usize,
+    #[serde(default)]
+    output: GrepOutput,
+}
+
+#[derive(Deserialize, Default, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum GrepOutput {
+    #[default]
+    Files,
+    Matches,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum PipelineStep {
+    Grep(GrepRequest),
+    Read(PipelineReadStep),
+}
+
+#[derive(Deserialize, Clone)]
+struct PipelineReadStep {
+    #[serde(default)]
+    reads: Option<Vec<ReadRequest>>,
+    #[serde(default)]
+    from: Option<PipelineInput>,
+    #[serde(default)]
+    mode: Option<ReadMode>,
+    #[serde(default)]
+    indentation: Option<IndentationArgs>,
+    #[serde(default)]
+    match_window_before: Option<usize>,
+    #[serde(default)]
+    match_window_after: Option<usize>,
+    #[serde(default = "defaults::limit")]
+    limit: usize,
+}
+
+#[derive(Deserialize, Clone)]
+struct MapRequest {
+    preset: MapPreset,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default = "defaults::map_limit")]
+    limit: usize,
+    #[serde(default = "defaults::write_artifacts")]
+    write_artifacts: bool,
+}
+
+#[derive(Deserialize, Default, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum MapPreset {
+    #[default]
+    ProtocolMap,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum PipelineInput {
+    PreviousFiles,
+    PreviousMatches,
+}
+
 /// Additional configuration for indentation-aware reads.
 #[derive(Deserialize, Clone)]
 struct IndentationArgs {
@@ -75,6 +182,64 @@ struct LineRecord {
     indent: usize,
 }
 
+#[derive(Clone, Debug)]
+struct GrepMatch {
+    path: PathBuf,
+    line: usize,
+    text: String,
+}
+
+#[derive(Clone, Debug)]
+struct ReadArtifact {
+    path: PathBuf,
+    label: Option<String>,
+    lines: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ProtocolMapArtifact {
+    preset: &'static str,
+    root: String,
+    generated_at: String,
+    hot_files: Vec<HotFileRecord>,
+    message_families: Vec<MessageFamilyRecord>,
+    version_clues: Vec<VersionClueRecord>,
+    evidence: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct HotFileRecord {
+    path: String,
+    score: usize,
+    reasons: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct MessageFamilyRecord {
+    name: String,
+    count: usize,
+    examples: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct VersionClueRecord {
+    path: String,
+    line: usize,
+    text: String,
+}
+
+#[derive(Default)]
+struct HotFileAccumulator {
+    score: usize,
+    reasons: Vec<String>,
+}
+
+enum PipelineValue {
+    Files(Vec<PathBuf>),
+    Matches(Vec<GrepMatch>),
+    Reads(Vec<ReadArtifact>),
+}
+
 impl LineRecord {
     fn trimmed(&self) -> &str {
         self.raw.trim_start()
@@ -100,7 +265,7 @@ impl ToolHandler for ReadFileHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
-        let ToolInvocation { payload, .. } = invocation;
+        let ToolInvocation { payload, turn, .. } = invocation;
 
         let arguments = match payload {
             ToolPayload::Function { arguments } => arguments,
@@ -119,38 +284,43 @@ impl ToolHandler for ReadFileHandler {
             limit,
             mode,
             indentation,
+            reads,
+            grep,
+            pipeline,
+            map,
         } = args;
 
-        if offset == 0 {
+        let body = if let Some(map) = map {
+            execute_map_request(&turn, &map).await?
+        } else if let Some(pipeline) = pipeline {
+            render_pipeline_value(execute_pipeline(&turn, pipeline).await?)
+        } else if let Some(grep) = grep {
+            render_pipeline_value(execute_grep_step(&turn, &grep).await?)
+        } else if let Some(reads) = reads {
+            let artifacts = execute_explicit_reads(&turn, reads).await?;
+            render_read_artifacts(&artifacts)
+        } else if let Some(file_path) = file_path {
+            validate_read_bounds(offset, limit)?;
+            let path = turn.resolve_path(Some(file_path));
+            let collected = execute_single_read(
+                &path,
+                ReadRequest {
+                    file_path: path.display().to_string(),
+                    offset,
+                    limit,
+                    mode,
+                    indentation,
+                },
+            )
+            .await?;
+            collected.lines.join("\n")
+        } else {
             return Err(FunctionCallError::RespondToModel(
-                "offset must be a 1-indexed line number".to_string(),
+                "read_file requires one of: file_path, reads, grep, pipeline, or map".to_string(),
             ));
-        }
-
-        if limit == 0 {
-            return Err(FunctionCallError::RespondToModel(
-                "limit must be greater than zero".to_string(),
-            ));
-        }
-
-        let path = PathBuf::from(&file_path);
-        if !path.is_absolute() {
-            return Err(FunctionCallError::RespondToModel(
-                "file_path must be an absolute path".to_string(),
-            ));
-        }
-
-        let collected = match mode {
-            ReadMode::Slice => slice::read(&path, offset, limit).await?,
-            ReadMode::Indentation => {
-                let indentation = indentation.unwrap_or_default();
-                indentation::read_block(&path, offset, limit, indentation).await?
-            }
         };
-        Ok(FunctionToolOutput::from_text(
-            collected.join("\n"),
-            Some(true),
-        ))
+
+        Ok(FunctionToolOutput::from_text(body, Some(true)))
     }
 }
 
@@ -1292,6 +1462,18 @@ mod defaults {
 
     pub fn limit() -> usize {
         2000
+    }
+
+    pub fn grep_limit() -> usize {
+        DEFAULT_GREP_LIMIT
+    }
+
+    pub fn map_limit() -> usize {
+        12
+    }
+
+    pub fn write_artifacts() -> bool {
+        false
     }
 
     pub fn max_levels() -> usize {

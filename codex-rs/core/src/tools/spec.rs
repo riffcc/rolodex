@@ -3846,6 +3846,8 @@ mod tests {
         );
         assert!(tools.iter().any(|tool| tool_name(&tool.spec) == "list_dir"));
     }
+
+    #[test]
     fn test_build_specs_mcp_tools_converted() {
         let config = test_config();
         let model_info = ModelsManager::construct_model_info_offline_for_tests("o3", &config);

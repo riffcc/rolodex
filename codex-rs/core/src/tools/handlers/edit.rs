@@ -9,8 +9,8 @@ use serde::Deserialize;
 use crate::client_common::tools::ResponsesApiTool;
 use crate::client_common::tools::ToolSpec;
 use crate::function_tool::FunctionCallError;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::apply_patch::run_verified_apply_patch_action;
 use crate::tools::handlers::parse_arguments;
@@ -74,6 +74,8 @@ struct WorkingFile {
 
 #[async_trait]
 impl ToolHandler for EditHandler {
+    type Output = FunctionToolOutput;
+
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
@@ -82,7 +84,7 @@ impl ToolHandler for EditHandler {
         true
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
         let ToolInvocation {
             session,
             turn,
@@ -243,6 +245,7 @@ pub(crate) fn create_edit_tool() -> ToolSpec {
             additional_properties: Some(AdditionalProperties::Boolean(false)),
         },
         strict: false,
+        output_schema: None,
     })
 }
 
