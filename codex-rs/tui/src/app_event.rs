@@ -67,6 +67,12 @@ pub(crate) struct ConnectorsSnapshot {
     pub(crate) connectors: Vec<AppInfo>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectTabPlacement {
+    Left,
+    Right,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
@@ -80,6 +86,11 @@ pub(crate) enum AppEvent {
     /// Focus an existing project tab for the cwd or open it as a new tab.
     FocusOrOpenProject {
         cwd: PathBuf,
+    },
+    /// Focus an existing project tab for the cwd or open it beside the current tab.
+    FocusOrOpenProjectWithPlacement {
+        cwd: PathBuf,
+        placement: ProjectTabPlacement,
     },
     /// Add or remove the provided cwd from persisted favorites.
     ToggleFavoriteProject {
@@ -105,6 +116,8 @@ pub(crate) enum AppEvent {
     },
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
+    /// Open the rename prompt for the currently focused tab/thread.
+    OpenRenameCurrentTabPrompt,
 
     /// Submit an op to the specified thread, regardless of current focus.
     SubmitThreadOp {

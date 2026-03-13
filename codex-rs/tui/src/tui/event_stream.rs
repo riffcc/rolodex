@@ -50,8 +50,7 @@ const GAMEPAD_MIN_REPEAT_INTERVAL: Duration = Duration::from_millis(60);
 const GAMEPAD_MAX_REPEAT_INTERVAL: Duration = Duration::from_millis(180);
 const STICK_DEADZONE: f32 = 0.45;
 const TRIGGER_DEADZONE: f32 = 0.55;
-const SHOULDER_NEW_TAB_HOLD_DURATION: Duration = Duration::from_secs(2);
-const SHOULDER_NEW_TAB_PRESS_WINDOW: Duration = Duration::from_millis(1500);
+const SHOULDER_NEW_TAB_HOLD_DURATION: Duration = Duration::from_secs(4);
 
 /// Result type produced by an event source.
 pub type EventResult = std::io::Result<Event>;
@@ -216,6 +215,7 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
     /// a mapped event, hits `Pending`, or sees EOF/error. When the broker is paused, it drops
     /// the underlying stream and returns `Pending` to fully release stdin.
     pub fn poll_crossterm_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<TuiEvent>> {
+        let mut restarted_source = false;
         // Some crossterm events map to None (e.g. FocusLost, mouse); loop so we keep polling
         // until we return a mapped event, hit Pending, or see EOF/error.
         loop {
@@ -238,10 +238,19 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
                     }
                 };
                 match Pin::new(events).poll_next(cx) {
-                    Poll::Ready(Some(Ok(event))) => Some(event),
-                    Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
+                    Poll::Ready(Some(Ok(event))) => Ok(Some(event)),
+                    Poll::Ready(Some(Err(err))) => {
+                        tracing::debug!(
+                            error = %err,
+                            "restarting crossterm event source after input error"
+                        );
                         *state = EventBrokerState::Start;
-                        return Poll::Ready(None);
+                        Err(())
+                    }
+                    Poll::Ready(None) => {
+                        tracing::debug!("restarting crossterm event source after input EOF");
+                        *state = EventBrokerState::Start;
+                        Err(())
                     }
                     Poll::Pending => {
                         drop(state);
@@ -255,8 +264,19 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
                 }
             };
 
-            if let Some(mapped) = poll_result.and_then(|event| self.map_crossterm_event(event)) {
-                return Poll::Ready(Some(mapped));
+            match poll_result {
+                Ok(Some(event)) => {
+                    if let Some(mapped) = self.map_crossterm_event(event) {
+                        return Poll::Ready(Some(mapped));
+                    }
+                }
+                Ok(None) => unreachable!("poll result should only be None when the source ends"),
+                Err(()) => {
+                    if restarted_source {
+                        return Poll::Pending;
+                    }
+                    restarted_source = true;
+                }
             }
         }
     }
@@ -387,8 +407,8 @@ struct GamepadState {
     dpad_right: bool,
     left_shoulder_pressed_at: Option<Instant>,
     right_shoulder_pressed_at: Option<Instant>,
-    left_new_tab_armed_until: Option<Instant>,
-    right_new_tab_armed_until: Option<Instant>,
+    left_new_tab_fired: bool,
+    right_new_tab_fired: bool,
     focus_next_button: bool,
     repeat_up: RepeatState,
     repeat_down: RepeatState,
@@ -442,7 +462,6 @@ impl GamepadState {
     }
 
     fn set_button(&mut self, button: Button, pressed: bool, tx: &mpsc::UnboundedSender<TuiEvent>) {
-        let now = Instant::now();
         match button {
             Button::DPadUp => self.dpad_up = pressed,
             Button::DPadDown => self.dpad_down = pressed,
@@ -452,22 +471,18 @@ impl GamepadState {
                 Self::handle_shoulder_button(
                     pressed,
                     &mut self.left_shoulder_pressed_at,
-                    &mut self.left_new_tab_armed_until,
+                    &mut self.left_new_tab_fired,
                     tx,
                     GamepadAction::ProjectTabPrevious,
-                    GamepadAction::ProjectNewTabLeft,
-                    now,
                 );
             }
             Button::RightTrigger => {
                 Self::handle_shoulder_button(
                     pressed,
                     &mut self.right_shoulder_pressed_at,
-                    &mut self.right_new_tab_armed_until,
+                    &mut self.right_new_tab_fired,
                     tx,
                     GamepadAction::ProjectTabNext,
-                    GamepadAction::ProjectNewTabRight,
-                    now,
                 );
             }
             Button::LeftTrigger2 => {}
@@ -507,29 +522,20 @@ impl GamepadState {
     fn handle_shoulder_button(
         pressed: bool,
         pressed_at: &mut Option<Instant>,
-        armed_until: &mut Option<Instant>,
+        new_tab_fired: &mut bool,
         tx: &mpsc::UnboundedSender<TuiEvent>,
         switch_action: GamepadAction,
-        new_tab_action: GamepadAction,
-        now: Instant,
     ) {
         if pressed {
-            if armed_until.is_some_and(|armed| armed >= now) {
-                *armed_until = None;
-                let _ = tx.send(TuiEvent::Gamepad(new_tab_action));
-                return;
-            }
-            *armed_until = None;
-            *pressed_at = Some(now);
-            let _ = tx.send(TuiEvent::Gamepad(switch_action));
+            *pressed_at = Some(Instant::now());
+            *new_tab_fired = false;
             return;
         }
 
-        if pressed_at.take().is_some_and(|started| {
-            now.saturating_duration_since(started) >= SHOULDER_NEW_TAB_HOLD_DURATION
-        }) {
-            *armed_until = Some(now + SHOULDER_NEW_TAB_PRESS_WINDOW);
+        if pressed_at.take().is_some() && !*new_tab_fired {
+            let _ = tx.send(TuiEvent::Gamepad(switch_action));
         }
+        *new_tab_fired = false;
     }
 
     fn set_axis(&mut self, axis: Axis, value: f32) {
@@ -543,18 +549,20 @@ impl GamepadState {
 
     fn emit_repeats(&mut self, tx: &mpsc::UnboundedSender<TuiEvent>) {
         let now = Instant::now();
-        if self
-            .left_new_tab_armed_until
-            .is_some_and(|armed_until| armed_until < now)
-        {
-            self.left_new_tab_armed_until = None;
-        }
-        if self
-            .right_new_tab_armed_until
-            .is_some_and(|armed_until| armed_until < now)
-        {
-            self.right_new_tab_armed_until = None;
-        }
+        Self::emit_shoulder_hold_action(
+            &mut self.left_shoulder_pressed_at,
+            &mut self.left_new_tab_fired,
+            tx,
+            GamepadAction::ProjectNewTabLeft,
+            now,
+        );
+        Self::emit_shoulder_hold_action(
+            &mut self.right_shoulder_pressed_at,
+            &mut self.right_new_tab_fired,
+            tx,
+            GamepadAction::ProjectNewTabRight,
+            now,
+        );
 
         let left_strength = axis_strength(self.left_x, false);
         let right_strength = axis_strength(self.left_x, true);
@@ -599,6 +607,24 @@ impl GamepadState {
             TuiEvent::Gamepad(GamepadAction::FocusNext),
             now,
         );
+    }
+
+    fn emit_shoulder_hold_action(
+        pressed_at: &mut Option<Instant>,
+        new_tab_fired: &mut bool,
+        tx: &mpsc::UnboundedSender<TuiEvent>,
+        new_tab_action: GamepadAction,
+        now: Instant,
+    ) {
+        if *new_tab_fired {
+            return;
+        }
+        if pressed_at.is_some_and(|started| {
+            now.saturating_duration_since(started) >= SHOULDER_NEW_TAB_HOLD_DURATION
+        }) {
+            let _ = tx.send(TuiEvent::Gamepad(new_tab_action));
+            *new_tab_fired = true;
+        }
     }
 }
 
@@ -784,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn left_trigger_is_unmapped() {
+    fn left_trigger_2_is_unmapped() {
         let mut state = GamepadState::default();
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -792,6 +818,49 @@ mod tests {
         state.set_axis(Axis::LeftZ, 1.0);
         state.emit_repeats(&tx);
 
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn shoulder_tap_switches_tabs_on_release() {
+        let mut state = GamepadState::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        state.set_button(Button::RightTrigger, true, &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        state.set_button(Button::RightTrigger, false, &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TuiEvent::Gamepad(GamepadAction::ProjectTabNext))
+        ));
+    }
+
+    #[test]
+    fn shoulder_hold_opens_new_tab_once() {
+        let mut state = GamepadState::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        state.left_shoulder_pressed_at = Some(Instant::now() - SHOULDER_NEW_TAB_HOLD_DURATION);
+        state.emit_repeats(&tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TuiEvent::Gamepad(GamepadAction::ProjectNewTabLeft))
+        ));
+
+        state.emit_repeats(&tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        state.set_button(Button::LeftTrigger, false, &tx);
         assert!(matches!(
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
@@ -875,14 +944,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn error_or_eof_ends_stream() {
+    async fn input_error_restarts_stream() {
         let (broker, handle, _draw_tx, draw_rx, terminal_focused) = setup();
         let mut stream = make_stream(broker, draw_rx, terminal_focused);
 
         handle.send(Err(std::io::Error::other("boom")));
+        let pending = timeout(Duration::from_millis(25), stream.next()).await;
+        assert!(
+            pending.is_err(),
+            "transient input errors should restart the source instead of ending the stream"
+        );
+
+        let expected_key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+        handle.send(Ok(Event::Key(expected_key)));
 
         let next = stream.next().await;
-        assert!(next.is_none());
+        assert!(matches!(next, Some(TuiEvent::Key(key)) if key == expected_key));
     }
 
     #[tokio::test(flavor = "current_thread")]

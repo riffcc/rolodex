@@ -4506,7 +4506,7 @@ impl ChatWidget {
         }
     }
 
-    fn show_rename_prompt(&mut self) {
+    pub(crate) fn show_rename_prompt(&mut self) {
         let tx = self.app_event_tx.clone();
         let has_name = self
             .thread_name

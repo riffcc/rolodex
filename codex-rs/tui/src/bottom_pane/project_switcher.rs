@@ -82,6 +82,7 @@ enum ProjectSwitcherAction {
     BrowseProjects,
     BrowseFilesystem,
     EditFavorites,
+    RenameCurrentTab,
     ToggleAttentionMode,
     CloseCurrentTab,
     SaveAndQuit,
@@ -93,6 +94,7 @@ impl ProjectSwitcherAction {
             Self::BrowseProjects => "Browse projects".to_string(),
             Self::BrowseFilesystem => "Browse /".to_string(),
             Self::EditFavorites => "Edit favorites".to_string(),
+            Self::RenameCurrentTab => "Rename tab".to_string(),
             Self::ToggleAttentionMode => format!("Attention {}", attention_mode.next().label()),
             Self::CloseCurrentTab => "Close tab".to_string(),
             Self::SaveAndQuit => "Save + quit".to_string(),
@@ -155,11 +157,12 @@ impl ProjectSwitcherView {
         }
     }
 
-    fn action_items(&self) -> [ProjectSwitcherAction; 6] {
+    fn action_items(&self) -> [ProjectSwitcherAction; 7] {
         [
             ProjectSwitcherAction::BrowseProjects,
             ProjectSwitcherAction::BrowseFilesystem,
             ProjectSwitcherAction::EditFavorites,
+            ProjectSwitcherAction::RenameCurrentTab,
             ProjectSwitcherAction::ToggleAttentionMode,
             ProjectSwitcherAction::CloseCurrentTab,
             ProjectSwitcherAction::SaveAndQuit,
@@ -346,6 +349,9 @@ impl ProjectSwitcherView {
             ProjectSwitcherAction::EditFavorites => {
                 self.app_event_tx
                     .send(AppEvent::OpenProjectFavoritesManager { initial_path: None });
+            }
+            ProjectSwitcherAction::RenameCurrentTab => {
+                self.app_event_tx.send(AppEvent::OpenRenameCurrentTabPrompt);
             }
             ProjectSwitcherAction::ToggleAttentionMode => {
                 self.app_event_tx.send(AppEvent::SetAttentionMode {

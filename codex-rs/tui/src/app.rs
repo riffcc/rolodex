@@ -1,6 +1,7 @@
 use crate::app_backtrack::BacktrackState;
 use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
+use crate::app_event::ProjectTabPlacement;
 use crate::app_event::RealtimeAudioDeviceKind;
 #[cfg(target_os = "windows")]
 use crate::app_event::WindowsSandboxEnableMode;
@@ -9,6 +10,7 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::FavoriteProjectTile;
 use crate::bottom_pane::FavoritesEditorView;
 use crate::bottom_pane::FeedbackAudience;
+use crate::bottom_pane::ProjectChooserView;
 use crate::bottom_pane::ProjectSwitcherTabTile;
 use crate::bottom_pane::ProjectSwitcherView;
 use crate::bottom_pane::SelectionItem;
@@ -162,6 +164,13 @@ fn preferred_projects_root() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let projects = home.join("projects");
     projects.is_dir().then_some(projects)
+}
+
+fn new_tab_placement(placement: ProjectTabPlacement) -> NewTabPlacement {
+    match placement {
+        ProjectTabPlacement::Left => NewTabPlacement::Left,
+        ProjectTabPlacement::Right => NewTabPlacement::Right,
+    }
 }
 
 fn attention_priority(level: ProjectAttentionLevel) -> u8 {
@@ -1616,6 +1625,19 @@ impl App {
             )));
     }
 
+    fn open_project_chooser(&mut self, placement: ProjectTabPlacement) {
+        let initial_root =
+            preferred_projects_root().or_else(|| Some(self.chat_widget.config_ref().cwd.clone()));
+        self.chat_widget
+            .show_custom_view(Box::new(ProjectChooserView::new(
+                self.app_event_tx.clone(),
+                self.build_favorite_tiles(),
+                self.project_navigation.recents().to_vec(),
+                initial_root,
+                placement,
+            )));
+    }
+
     fn note_user_input(&mut self) {
         self.last_user_input_at = Instant::now();
     }
@@ -1781,6 +1803,16 @@ impl App {
     }
 
     async fn focus_or_open_project(&mut self, tui: &mut tui::Tui, cwd: PathBuf) -> Result<()> {
+        self.focus_or_open_project_with_placement(tui, cwd, ProjectTabPlacement::Right)
+            .await
+    }
+
+    async fn focus_or_open_project_with_placement(
+        &mut self,
+        tui: &mut tui::Tui,
+        cwd: PathBuf,
+        placement: ProjectTabPlacement,
+    ) -> Result<()> {
         if let Some((_, thread_id)) = self.project_navigation.find_thread_for_cwd(&cwd) {
             self.select_agent_thread(tui, thread_id).await?;
             self.refresh_in_memory_config_from_disk_best_effort("switching project tabs")
@@ -1790,7 +1822,7 @@ impl App {
             return Ok(());
         }
 
-        self.open_project_in_new_tab(tui, cwd, NewTabPlacement::Right)
+        self.open_project_in_new_tab(tui, cwd, new_tab_placement(placement))
             .await
     }
 
@@ -3867,6 +3899,11 @@ impl App {
                 self.focus_or_open_project(tui, cwd).await?;
                 self.sync_project_tabs_chrome();
             }
+            AppEvent::FocusOrOpenProjectWithPlacement { cwd, placement } => {
+                self.focus_or_open_project_with_placement(tui, cwd, placement)
+                    .await?;
+                self.sync_project_tabs_chrome();
+            }
             AppEvent::ToggleFavoriteProject { cwd } => {
                 self.toggle_project_favorite(cwd);
             }
@@ -3897,6 +3934,9 @@ impl App {
             }
             AppEvent::SelectAgentThread(thread_id) => {
                 self.select_agent_thread(tui, thread_id).await?;
+            }
+            AppEvent::OpenRenameCurrentTabPrompt => {
+                self.chat_widget.show_rename_prompt();
             }
             AppEvent::OpenSkillsList => {
                 self.chat_widget.open_skills_list();
@@ -4648,19 +4688,13 @@ impl App {
             }
             GamepadAction::ProjectNewTabLeft => {
                 if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
-                    let cwd = self.chat_widget.config_ref().cwd.clone();
-                    let _ = self
-                        .open_project_in_new_tab(tui, cwd, NewTabPlacement::Left)
-                        .await;
+                    self.open_project_chooser(ProjectTabPlacement::Left);
                 }
                 None
             }
             GamepadAction::ProjectNewTabRight => {
                 if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
-                    let cwd = self.chat_widget.config_ref().cwd.clone();
-                    let _ = self
-                        .open_project_in_new_tab(tui, cwd, NewTabPlacement::Right)
-                        .await;
+                    self.open_project_chooser(ProjectTabPlacement::Right);
                 }
                 None
             }
