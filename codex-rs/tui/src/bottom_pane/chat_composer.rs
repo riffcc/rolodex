@@ -386,6 +386,7 @@ pub(crate) struct ChatComposer {
     /// When false, the composer is temporarily read-only (e.g. during sandbox setup).
     input_enabled: bool,
     input_disabled_placeholder: Option<String>,
+    active_agent_label: Option<String>,
     /// Non-bracketed paste burst tracker (see `bottom_pane/paste_burst.rs`).
     paste_burst: PasteBurst,
     // When true, disables paste-burst logic and inserts characters immediately.
@@ -540,6 +541,7 @@ impl ChatComposer {
             windows_degraded_sandbox_active: false,
             status_line_value: None,
             status_line_enabled: false,
+            active_agent_label: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -2789,6 +2791,14 @@ impl ChatComposer {
                 modifiers: KeyModifiers::NONE,
                 kind: KeyEventKind::Press,
                 ..
+            } if self.is_task_running && !self.is_bang_shell_command() => {
+                self.handle_submission(true)
+            }
+            KeyEvent {
+                code: KeyCode::Tab,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                ..
             } => (InputResult::None, true),
             KeyEvent {
                 code: KeyCode::Enter,
@@ -3200,6 +3210,7 @@ impl ChatComposer {
             context_window_used_tokens: self.context_window_used_tokens,
             status_line_value: self.status_line_value.clone(),
             status_line_enabled: self.status_line_enabled,
+            active_agent_label: self.active_agent_label.clone(),
         }
     }
 
@@ -3592,6 +3603,7 @@ impl ChatComposer {
                     path: Some(skill.path_to_skills_md.to_string_lossy().into_owned()),
                     category_tag: (skill.scope == codex_protocol::protocol::SkillScope::Repo)
                         .then(|| "[Repo]".to_string()),
+                    sort_rank: 0,
                 });
             }
         }
@@ -3644,6 +3656,7 @@ impl ChatComposer {
                     path: Some(format!("plugin://{}", plugin.config_name)),
                     category_tag: (!marketplace_name.is_empty())
                         .then(|| format!("[{marketplace_name}]")),
+                    sort_rank: 1,
                 });
             }
         }
@@ -3667,6 +3680,7 @@ impl ChatComposer {
                     search_terms,
                     path: Some(format!("app://{connector_id}")),
                     category_tag: Some("[App]".to_string()),
+                    sort_rank: 2,
                 });
             }
         }
@@ -3682,6 +3696,14 @@ impl ChatComposer {
         }
 
         mentions
+    }
+
+    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) -> bool {
+        if self.active_agent_label == active_agent_label {
+            return false;
+        }
+        self.active_agent_label = active_agent_label;
+        true
     }
 
     fn connector_brief_description(connector: &AppInfo) -> String {
