@@ -1462,6 +1462,13 @@ fn create_search_tool_bm25_tool(app_tools: &HashMap<String, ToolInfo>) -> ToolSp
 }
 
 fn create_read_file_tool() -> ToolSpec {
+    let read_mode_schema = JsonSchema::String {
+        description: Some(
+            "Optional mode selector: \"slice\" for simple ranges (default) or \"indentation\" \
+             to expand around an anchor line."
+                .to_string(),
+        ),
+    };
     let indentation_properties = BTreeMap::from([
         (
             "anchor_line".to_string(),
@@ -1508,12 +1515,228 @@ fn create_read_file_tool() -> ToolSpec {
             },
         ),
     ]);
+    let indentation_schema = JsonSchema::Object {
+        properties: indentation_properties,
+        required: None,
+        additional_properties: Some(false.into()),
+    };
+    let read_request_schema = JsonSchema::Object {
+        properties: BTreeMap::from([
+            (
+                "file_path".to_string(),
+                JsonSchema::String {
+                    description: Some("Absolute path to the file".to_string()),
+                },
+            ),
+            (
+                "offset".to_string(),
+                JsonSchema::Number {
+                    description: Some(
+                        "The line number to start reading from. Must be 1 or greater.".to_string(),
+                    ),
+                },
+            ),
+            (
+                "limit".to_string(),
+                JsonSchema::Number {
+                    description: Some("The maximum number of lines to return.".to_string()),
+                },
+            ),
+            ("mode".to_string(), read_mode_schema.clone()),
+            ("indentation".to_string(), indentation_schema.clone()),
+        ]),
+        required: Some(vec!["file_path".to_string()]),
+        additional_properties: Some(false.into()),
+    };
+    let grep_request_schema = JsonSchema::Object {
+        properties: BTreeMap::from([
+            (
+                "include".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "Optional glob that limits which files are searched (e.g. \"*.rs\" or \
+                         \"*.{ts,tsx}\")."
+                            .to_string(),
+                    ),
+                },
+            ),
+            (
+                "limit".to_string(),
+                JsonSchema::Number {
+                    description: Some(
+                        "Maximum number of file paths or matches to return (defaults to 100)."
+                            .to_string(),
+                    ),
+                },
+            ),
+            (
+                "output".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "Set to \"files\" (default) to list matching paths or \"matches\" to emit matching lines."
+                            .to_string(),
+                    ),
+                },
+            ),
+            (
+                "path".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "Directory or file path to search. Defaults to the session's working directory."
+                            .to_string(),
+                    ),
+                },
+            ),
+            (
+                "pattern".to_string(),
+                JsonSchema::String {
+                    description: Some("Regular expression pattern to search for.".to_string()),
+                },
+            ),
+        ]),
+        required: Some(vec!["pattern".to_string()]),
+        additional_properties: Some(false.into()),
+    };
+    let pipeline_step_schema = JsonSchema::Object {
+        properties: BTreeMap::from([
+            (
+                "from".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "Read from the previous grep stage using \"previous_files\" or \"previous_matches\"."
+                            .to_string(),
+                    ),
+                },
+            ),
+            (
+                "include".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "Optional glob that limits which files are searched (e.g. \"*.rs\" or \
+                         \"*.{ts,tsx}\")."
+                            .to_string(),
+                    ),
+                },
+            ),
+            ("indentation".to_string(), indentation_schema.clone()),
+            (
+                "limit".to_string(),
+                JsonSchema::Number {
+                    description: Some(
+                        "The maximum number of file paths, matches, or lines to return for this step."
+                            .to_string(),
+                    ),
+                },
+            ),
+            (
+                "match_window_after".to_string(),
+                JsonSchema::Number {
+                    description: Some(
+                        "When reading from previous_matches, include this many trailing lines after each match."
+                            .to_string(),
+                    ),
+                },
+            ),
+            (
+                "match_window_before".to_string(),
+                JsonSchema::Number {
+                    description: Some(
+                        "When reading from previous_matches, include this many leading lines before each match."
+                            .to_string(),
+                    ),
+                },
+            ),
+            ("mode".to_string(), read_mode_schema.clone()),
+            (
+                "op".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "Pipeline step kind. Use \"grep\" for discovery or \"read\" for follow-up reads."
+                            .to_string(),
+                    ),
+                },
+            ),
+            (
+                "output".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "For grep steps, set to \"files\" (default) or \"matches\".".to_string(),
+                    ),
+                },
+            ),
+            (
+                "path".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "Directory or file path to search. Defaults to the session's working directory."
+                            .to_string(),
+                    ),
+                },
+            ),
+            (
+                "pattern".to_string(),
+                JsonSchema::String {
+                    description: Some("Regular expression pattern to search for.".to_string()),
+                },
+            ),
+            (
+                "reads".to_string(),
+                JsonSchema::Array {
+                    items: Box::new(read_request_schema.clone()),
+                    description: Some("Explicit read requests to execute in this pipeline step.".to_string()),
+                },
+            ),
+        ]),
+        required: Some(vec!["op".to_string()]),
+        additional_properties: Some(false.into()),
+    };
+    let map_request_schema = JsonSchema::Object {
+        properties: BTreeMap::from([
+            (
+                "limit".to_string(),
+                JsonSchema::Number {
+                    description: Some(
+                        "Maximum number of hot files or summary records to include.".to_string(),
+                    ),
+                },
+            ),
+            (
+                "path".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "Root path to investigate. Defaults to the session's working directory."
+                            .to_string(),
+                    ),
+                },
+            ),
+            (
+                "preset".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "High-level investigation preset. Currently supports \"protocol_map\"."
+                            .to_string(),
+                    ),
+                },
+            ),
+            (
+                "write_artifacts".to_string(),
+                JsonSchema::Boolean {
+                    description: Some(
+                        "When true, persist the generated map artifacts under the investigated root."
+                            .to_string(),
+                    ),
+                },
+            ),
+        ]),
+        required: Some(vec!["preset".to_string()]),
+        additional_properties: Some(false.into()),
+    };
 
     let properties = BTreeMap::from([
         (
             "file_path".to_string(),
             JsonSchema::String {
-                description: Some("Absolute path to the file".to_string()),
+                description: Some("Legacy single-read path for a direct file read.".to_string()),
             },
         ),
         (
@@ -1530,35 +1753,37 @@ fn create_read_file_tool() -> ToolSpec {
                 description: Some("The maximum number of lines to return.".to_string()),
             },
         ),
+        ("mode".to_string(), read_mode_schema),
+        ("indentation".to_string(), indentation_schema),
         (
-            "mode".to_string(),
-            JsonSchema::String {
+            "reads".to_string(),
+            JsonSchema::Array {
+                items: Box::new(read_request_schema),
+                description: Some("Batched explicit reads.".to_string()),
+            },
+        ),
+        ("grep".to_string(), grep_request_schema),
+        (
+            "pipeline".to_string(),
+            JsonSchema::Array {
+                items: Box::new(pipeline_step_schema),
                 description: Some(
-                    "Optional mode selector: \"slice\" for simple ranges (default) or \"indentation\" \
-                     to expand around an anchor line."
+                    "Ordered pipeline stages that can chain grep and read work together."
                         .to_string(),
                 ),
             },
         ),
-        (
-            "indentation".to_string(),
-            JsonSchema::Object {
-                properties: indentation_properties,
-                required: None,
-                additional_properties: Some(false.into()),
-            },
-        ),
+        ("map".to_string(), map_request_schema),
     ]);
 
     ToolSpec::Function(ResponsesApiTool {
         name: "read_file".to_string(),
-        description:
-            "Reads a local file with 1-indexed line numbers, supporting slice and indentation-aware block modes."
-                .to_string(),
+        description: "Reads local files and can also drive multi-step repository investigation. Prefer `map: { preset: \"protocol_map\" }` for protocol and interface discovery before falling back to manual grep/read pipelines. Supports direct slice and indentation-aware reads, batched `reads`, native `grep`, ordered `pipeline` stages, and a `protocol_map` preset that summarizes hot files, message families, version clues, and actor graph evidence."
+            .to_string(),
         strict: false,
         parameters: JsonSchema::Object {
             properties,
-            required: Some(vec!["file_path".to_string()]),
+            required: None,
             additional_properties: Some(false.into()),
         },
         output_schema: None,
@@ -2827,8 +3052,13 @@ mod tests {
             create_exec_command_tool(true, false),
             create_write_stdin_tool(),
             PLAN_TOOL.clone(),
-            create_request_user_input_tool(CollaborationModesConfig::default()),
+            create_request_user_input_tool(CollaborationModesConfig {
+                default_mode_request_user_input: true,
+            }),
             create_apply_patch_freeform_tool(),
+            create_grep_files_tool(),
+            create_read_file_tool(),
+            create_list_dir_tool(),
             ToolSpec::WebSearch {
                 external_web_access: Some(true),
                 filters: None,
@@ -3533,6 +3763,9 @@ mod tests {
                 "update_plan",
                 "request_user_input",
                 "apply_patch",
+                "grep_files",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -3551,6 +3784,9 @@ mod tests {
                 "update_plan",
                 "request_user_input",
                 "apply_patch",
+                "grep_files",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -3571,6 +3807,9 @@ mod tests {
                 "update_plan",
                 "request_user_input",
                 "apply_patch",
+                "grep_files",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -3591,6 +3830,9 @@ mod tests {
                 "update_plan",
                 "request_user_input",
                 "apply_patch",
+                "grep_files",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -3609,6 +3851,9 @@ mod tests {
                 "update_plan",
                 "request_user_input",
                 "apply_patch",
+                "grep_files",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -3627,6 +3872,9 @@ mod tests {
                 "update_plan",
                 "request_user_input",
                 "apply_patch",
+                "grep_files",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -3644,6 +3892,9 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "grep_files",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -3662,6 +3913,9 @@ mod tests {
                 "update_plan",
                 "request_user_input",
                 "apply_patch",
+                "grep_files",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -3682,6 +3936,9 @@ mod tests {
                 "update_plan",
                 "request_user_input",
                 "apply_patch",
+                "grep_files",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],

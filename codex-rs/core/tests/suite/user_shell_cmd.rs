@@ -331,7 +331,7 @@ async fn user_shell_command_history_is_persisted_and_shared_with_model() -> anyh
 }
 
 #[tokio::test]
-async fn user_shell_command_does_not_set_network_sandbox_env_var() -> anyhow::Result<()> {
+async fn user_shell_command_sets_network_sandbox_env_var_when_restricted() -> anyhow::Result<()> {
     let server = responses::start_mock_server().await;
     let mut builder = core_test_support::test_codex::test_codex().with_config(|config| {
         config.permissions.network_sandbox_policy = NetworkSandboxPolicy::Restricted;
@@ -354,7 +354,7 @@ async fn user_shell_command_does_not_set_network_sandbox_env_var() -> anyhow::Re
     })
     .await;
     assert_eq!(end_event.exit_code, 0);
-    assert_eq!(end_event.stdout.trim(), "not-set");
+    assert_eq!(end_event.stdout.trim(), "1");
 
     Ok(())
 }

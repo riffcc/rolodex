@@ -975,7 +975,7 @@ async fn run_rg_command(
     cwd: &Path,
     extra_args: &[&str],
 ) -> Result<std::process::Output, FunctionCallError> {
-    let files_only = extra_args.iter().any(|arg| *arg == "--files-with-matches");
+    let files_only = extra_args.contains(&"--files-with-matches");
     let mut command = Command::new("rg");
     command.current_dir(cwd);
     for arg in extra_args {

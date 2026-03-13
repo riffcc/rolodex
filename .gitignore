@@ -41,6 +41,8 @@ AGENTS.override.md
 .nyc_output/
 .jest/
 *.tsbuildinfo
+/.codex/target/
+/codex-rs/tui/src/.palace/
 
 # logs
 *.log
@@ -90,4 +92,3 @@ CHANGELOG.ignore.md
 # Python bytecode files
 __pycache__/
 *.pyc
-
