@@ -42,6 +42,7 @@ AGENTS.override.md
 .jest/
 *.tsbuildinfo
 /.codex/target/
+/.codex/tools/
 /codex-rs/tui/src/.palace/
 
 # logs
