@@ -223,6 +223,18 @@ fn project_workspace_shortcut_direction(key_event: KeyEvent) -> Option<ProjectWo
     }
 }
 
+fn open_project_navigator_shortcut_matches(key_event: KeyEvent) -> bool {
+    matches!(
+        key_event,
+        KeyEvent {
+            code: KeyCode::Char('o'),
+            modifiers: crossterm::event::KeyModifiers::ALT,
+            kind: KeyEventKind::Press,
+            ..
+        }
+    )
+}
+
 fn attention_priority(level: ProjectAttentionLevel) -> u8 {
     match level {
         ProjectAttentionLevel::Approval => 0,
@@ -4976,12 +4988,7 @@ impl App {
         }
 
         match key_event {
-            KeyEvent {
-                code: KeyCode::Char(' '),
-                modifiers: crossterm::event::KeyModifiers::ALT,
-                kind: KeyEventKind::Press,
-                ..
-            } => {
+            key_event if open_project_navigator_shortcut_matches(key_event) => {
                 if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
                     self.open_project_navigator();
                     tui.frame_requester().schedule_frame();
@@ -5521,6 +5528,31 @@ mod tests {
                 KeyModifiers::ALT,
             )),
             None
+        );
+    }
+
+    #[test]
+    fn open_project_navigator_shortcut_matches_alt_o_only() {
+        assert_eq!(
+            open_project_navigator_shortcut_matches(KeyEvent::new(
+                KeyCode::Char('o'),
+                KeyModifiers::ALT,
+            )),
+            true
+        );
+        assert_eq!(
+            open_project_navigator_shortcut_matches(KeyEvent::new(
+                KeyCode::Char(' '),
+                KeyModifiers::ALT,
+            )),
+            false
+        );
+        assert_eq!(
+            open_project_navigator_shortcut_matches(KeyEvent::new(
+                KeyCode::Char('o'),
+                KeyModifiers::NONE,
+            )),
+            false
         );
     }
     use std::sync::Arc;
