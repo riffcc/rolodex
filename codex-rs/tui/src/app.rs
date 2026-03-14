@@ -179,6 +179,50 @@ fn new_tab_placement(placement: ProjectTabPlacement) -> NewTabPlacement {
     }
 }
 
+fn project_tab_shortcut_direction(key_event: KeyEvent) -> Option<ProjectTabDirection> {
+    match key_event {
+        KeyEvent {
+            code: KeyCode::PageUp,
+            modifiers: crossterm::event::KeyModifiers::ALT,
+            kind: KeyEventKind::Press,
+            ..
+        } => Some(ProjectTabDirection::Previous),
+        KeyEvent {
+            code: KeyCode::PageDown,
+            modifiers: crossterm::event::KeyModifiers::ALT,
+            kind: KeyEventKind::Press,
+            ..
+        } => Some(ProjectTabDirection::Next),
+        _ => None,
+    }
+}
+
+fn project_workspace_shortcut_direction(key_event: KeyEvent) -> Option<ProjectWorkspaceDirection> {
+    match key_event {
+        KeyEvent {
+            code: KeyCode::PageUp,
+            modifiers,
+            kind: KeyEventKind::Press,
+            ..
+        } if modifiers
+            == (crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT) =>
+        {
+            Some(ProjectWorkspaceDirection::Previous)
+        }
+        KeyEvent {
+            code: KeyCode::PageDown,
+            modifiers,
+            kind: KeyEventKind::Press,
+            ..
+        } if modifiers
+            == (crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT) =>
+        {
+            Some(ProjectWorkspaceDirection::Next)
+        }
+        _ => None,
+    }
+}
+
 fn attention_priority(level: ProjectAttentionLevel) -> u8 {
     match level {
         ProjectAttentionLevel::Approval => 0,
@@ -4916,8 +4960,35 @@ impl App {
             }
             return;
         }
+        if self.overlay.is_none()
+            && self.chat_widget.no_modal_or_popup_active()
+            && let Some(direction) = project_tab_shortcut_direction(key_event)
+        {
+            let _ = self.switch_project_tab(tui, direction).await;
+            return;
+        }
+        if self.overlay.is_none()
+            && self.chat_widget.no_modal_or_popup_active()
+            && let Some(direction) = project_workspace_shortcut_direction(key_event)
+        {
+            let _ = self.switch_project_workspace(tui, direction).await;
+            return;
+        }
 
         match key_event {
+            KeyEvent {
+                code: KeyCode::Char(' '),
+                modifiers: crossterm::event::KeyModifiers::ALT,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                if self.overlay.is_none() && self.chat_widget.no_modal_or_popup_active() {
+                    self.open_project_navigator();
+                    tui.frame_requester().schedule_frame();
+                } else {
+                    self.chat_widget.handle_key_event(key_event);
+                }
+            }
             KeyEvent {
                 code: KeyCode::Char('t'),
                 modifiers: crossterm::event::KeyModifiers::CONTROL,
@@ -5408,6 +5479,50 @@ mod tests {
     use ratatui::prelude::Line;
     use ratatui::prelude::Rect;
     use std::path::PathBuf;
+
+    #[test]
+    fn project_tab_shortcuts_match_alt_page_keys() {
+        assert_eq!(
+            project_tab_shortcut_direction(KeyEvent::new(KeyCode::PageUp, KeyModifiers::ALT)),
+            Some(ProjectTabDirection::Previous)
+        );
+        assert_eq!(
+            project_tab_shortcut_direction(KeyEvent::new(KeyCode::PageDown, KeyModifiers::ALT)),
+            Some(ProjectTabDirection::Next)
+        );
+        assert_eq!(
+            project_tab_shortcut_direction(KeyEvent::new(
+                KeyCode::PageUp,
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn project_workspace_shortcuts_match_ctrl_alt_page_keys() {
+        assert_eq!(
+            project_workspace_shortcut_direction(KeyEvent::new(
+                KeyCode::PageUp,
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            Some(ProjectWorkspaceDirection::Previous)
+        );
+        assert_eq!(
+            project_workspace_shortcut_direction(KeyEvent::new(
+                KeyCode::PageDown,
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            Some(ProjectWorkspaceDirection::Next)
+        );
+        assert_eq!(
+            project_workspace_shortcut_direction(KeyEvent::new(
+                KeyCode::PageDown,
+                KeyModifiers::ALT,
+            )),
+            None
+        );
+    }
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use tempfile::tempdir;
