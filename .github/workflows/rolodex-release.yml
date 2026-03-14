@@ -1,0 +1,63 @@
+name: rolodex-release
+
+on:
+  push:
+    tags:
+      - 'rolodex-v*'
+
+jobs:
+  build-linux-amd64:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compute stable Rolodex version
+        id: version
+        working-directory: .
+        run: |
+          set -euo pipefail
+          STABLE="$(./scripts/rolodex-version.py --format stable)"
+          DEB="$(./scripts/rolodex-version.py --format debian-stable)"
+          EXPECTED_TAG="rolodex-v${STABLE}"
+          if [[ "$GITHUB_REF_NAME" != "$EXPECTED_TAG" ]]; then
+            echo "expected tag $EXPECTED_TAG but got $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          echo "stable=$STABLE" >> "$GITHUB_OUTPUT"
+          echo "debian=$DEB" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp Cargo workspace version for this build
+        working-directory: .
+        run: ./scripts/set-workspace-version.py "${{ steps.version.outputs.stable }}"
+
+      - name: Install Linux build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev dpkg-dev
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+
+      - name: Cargo build Rolodex
+        run: cargo build --release --bin codex
+
+      - name: Prepare release artifacts
+        working-directory: .
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp codex-rs/target/release/codex "dist/rolodex-linux-amd64-${{ steps.version.outputs.stable }}"
+          ./scripts/build-rolodex-deb.sh "${{ steps.version.outputs.debian }}" codex-rs/target/release/codex dist
+
+      - name: Publish Rolodex release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          files: |
+            dist/rolodex-linux-amd64-${{ steps.version.outputs.stable }}
+            dist/rolodex_${{ steps.version.outputs.debian }}_amd64.deb

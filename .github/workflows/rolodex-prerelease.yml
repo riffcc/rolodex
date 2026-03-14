@@ -1,0 +1,64 @@
+name: rolodex-prerelease
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-linux-amd64:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compute Rolodex prerelease version
+        id: version
+        working-directory: .
+        run: |
+          set -euo pipefail
+          PRE="$(./scripts/rolodex-version.py --format prerelease)"
+          DEB="$(./scripts/rolodex-version.py --format debian-prerelease)"
+          SHA="$(./scripts/rolodex-version.py --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "debian=$DEB" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp Cargo workspace version for this build
+        working-directory: .
+        run: ./scripts/set-workspace-version.py "${{ steps.version.outputs.prerelease }}"
+
+      - name: Install Linux build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev dpkg-dev
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+
+      - name: Cargo build Rolodex
+        run: cargo build --release --bin codex
+
+      - name: Prepare artifact names
+        id: names
+        working-directory: .
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp codex-rs/target/release/codex "dist/rolodex-linux-amd64-${{ steps.version.outputs.prerelease }}"
+          ./scripts/build-rolodex-deb.sh "${{ steps.version.outputs.debian }}" codex-rs/target/release/codex dist
+          echo "binary=dist/rolodex-linux-amd64-${{ steps.version.outputs.prerelease }}" >> "$GITHUB_OUTPUT"
+          echo "deb=dist/rolodex_${{ steps.version.outputs.debian }}_amd64.deb" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Rolodex prerelease artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rolodex-prerelease-${{ steps.version.outputs.prerelease }}
+          path: |
+            ${{ steps.names.outputs.binary }}
+            ${{ steps.names.outputs.deb }}

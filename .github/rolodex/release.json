@@ -1,0 +1,7 @@
+{
+  "upstream_version": "0.111.0",
+  "riff_iteration": 1,
+  "package_name": "rolodex",
+  "display_name": "Rolodex",
+  "debian_architecture": "amd64"
+}
