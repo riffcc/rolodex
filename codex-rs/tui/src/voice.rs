@@ -34,6 +34,7 @@ use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 use tar::Archive;
 use tracing::error;
+use tracing::info;
 use tracing::trace;
 
 const AUDIO_MODEL: &str = "gpt-4o-mini-transcribe";

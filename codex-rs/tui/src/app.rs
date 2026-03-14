@@ -7693,7 +7693,7 @@ mod tests {
                 last_user_input_at: Instant::now(),
                 last_attention_switch_at: None,
                 last_drawn_area: None,
-                #[cfg(all(target_os = "linux", feature = "voice-input"))]
+                #[cfg(feature = "voice-input")]
                 handy_gamepad: HandyGamepadState::default(),
             },
             rx,
