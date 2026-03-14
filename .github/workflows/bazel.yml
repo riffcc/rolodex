@@ -60,7 +60,12 @@ jobs:
 
       - name: Make DotSlash available in PATH (Unix)
         if: runner.os != 'Windows'
-        run: cp "$(which dotslash)" /usr/local/bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/.github/bin"
+          cp "$(command -v dotslash)" "${GITHUB_WORKSPACE}/.github/bin/dotslash"
+          echo "${GITHUB_WORKSPACE}/.github/bin" >> "$GITHUB_PATH"
 
       - name: Make DotSlash available in PATH (Windows)
         if: runner.os == 'Windows'

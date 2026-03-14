@@ -129,15 +129,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if command -v apt-get >/dev/null 2>&1; then
-            as_root() { if command -v sudo >/dev/null 2>&1; then sudo "$@"; else "$@"; fi; }
-            as_root apt-get update -y
-            packages=(pkg-config libcap-dev libasound2-dev libudev-dev)
-            if [[ "${{ matrix.target }}" == 'x86_64-unknown-linux-musl' || "${{ matrix.target }}" == 'aarch64-unknown-linux-musl' ]]; then
-              packages+=(libubsan1)
-            fi
-            as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+          if ! command -v apt-get >/dev/null 2>&1; then
+            exit 0
           fi
+          if command -v sudo >/dev/null 2>&1; then
+            as_root() { sudo "$@"; }
+          elif [[ "$(id -u)" -eq 0 ]]; then
+            as_root() { "$@"; }
+          else
+            if command -v pkg-config >/dev/null 2>&1; then
+              echo "apt-get is available but this runner has no sudo/root; assuming build dependencies are preinstalled."
+              exit 0
+            fi
+            echo "pkg-config is missing and this runner cannot install packages without sudo/root." >&2
+            exit 1
+          fi
+          as_root apt-get update -y
+          packages=(pkg-config libcap-dev libasound2-dev libudev-dev)
+          if [[ "${{ matrix.target }}" == 'x86_64-unknown-linux-musl' || "${{ matrix.target }}" == 'aarch64-unknown-linux-musl' ]]; then
+            packages+=(libubsan1)
+          fi
+          as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
           targets: ${{ matrix.target }}

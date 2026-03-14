@@ -20,8 +20,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2
         with:
-          rust-version: stable
-          manifest-path: ./codex-rs/Cargo.toml
+          tool: cargo-deny
+
+      - name: Run cargo-deny
+        run: cargo deny check

@@ -37,9 +37,21 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           set -euo pipefail
-          as_root() { if command -v sudo >/dev/null 2>&1; then sudo "$@"; else "$@"; fi; }
+          if command -v sudo >/dev/null 2>&1; then
+            as_root() { sudo "$@"; }
+          elif [[ "$(id -u)" -eq 0 ]]; then
+            as_root() { "$@"; }
+          else
+            if command -v pkg-config >/dev/null 2>&1; then
+              echo "apt-get is available but this runner has no sudo/root; assuming build dependencies are preinstalled."
+              exit 0
+            fi
+            echo "pkg-config is missing and this runner cannot install packages without sudo/root." >&2
+            exit 1
+          fi
           as_root apt-get update -y
-          as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libasound2-dev libudev-dev dpkg-dev
+          packages=(pkg-config libcap-dev libasound2-dev libudev-dev dpkg-dev)
+          as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
 
       - uses: dtolnay/rust-toolchain@1.93.0
 
