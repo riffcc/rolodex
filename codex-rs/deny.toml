@@ -147,6 +147,9 @@ exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
     # list
     #{ allow = ["Zlib"], crate = "adler32" },
+    # Riff-maintained Palace crates are intentionally AGPL-licensed.
+    { allow = ["AGPL-3.0"], crate = "llm-code-sdk" },
+    { allow = ["AGPL-3.0"], crate = "palace-plane" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,

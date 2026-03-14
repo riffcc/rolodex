@@ -8,7 +8,8 @@ on:
 
 jobs:
   build-linux-amd64:
-    runs-on: ubuntu-24.04
+    # Riff packaging runs on our Debian 13 self-hosted fleet.
+    runs-on: [self-hosted, Linux, X64, lxc, spacetempagency]
     permissions:
       contents: read
     defaults:
@@ -37,7 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev dpkg-dev
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libasound2-dev libudev-dev dpkg-dev
 
       - uses: dtolnay/rust-toolchain@1.93.0
 
