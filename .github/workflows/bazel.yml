@@ -21,11 +21,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS
-          - os: macos-15-xlarge
-            target: aarch64-apple-darwin
-          - os: macos-15-xlarge
-            target: x86_64-apple-darwin
+          # Linux only for now. We will add our own macOS runner later rather
+          # than relying on paid hosted macOS capacity.
 
           # Linux
           - os: ubuntu-24.04
@@ -42,10 +39,11 @@ jobs:
           # TODO: Enable Windows once we fix the toolchain issues there.
           #- os: windows-latest
           #  target: x86_64-pc-windows-gnullvm
-    runs-on: ${{ matrix.os }}
+    # Riff CI runs on our Debian 13 self-hosted fleet.
+    runs-on: [self-hosted, Linux, X64, lxc, spacetempagency]
 
     # Configure a human readable name for each job
-    name: Local Bazel build on ${{ matrix.os }} for ${{ matrix.target }}
+    name: Local Bazel build on Debian 13 for ${{ matrix.target }}
 
     steps:
       - uses: actions/checkout@v6

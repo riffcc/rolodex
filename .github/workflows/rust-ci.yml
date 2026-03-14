@@ -12,7 +12,8 @@ jobs:
   # --- Detect what changed to detect which tests to run (always runs) -------------------------------------
   changed:
     name: Detect changed areas
-    runs-on: ubuntu-24.04
+    # Riff CI runs on our Debian 13 self-hosted fleet.
+    runs-on: [self-hosted, Linux, X64, lxc, spacetempagency]
     outputs:
       codex: ${{ steps.detect.outputs.codex }}
       workflows: ${{ steps.detect.outputs.workflows }}
@@ -51,7 +52,7 @@ jobs:
   # --- CI that doesn't need specific targets ---------------------------------
   general:
     name: Format / etc
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, lxc, spacetempagency]
     needs: changed
     if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
     defaults:
@@ -67,7 +68,7 @@ jobs:
 
   cargo_shear:
     name: cargo shear
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, lxc, spacetempagency]
     needs: changed
     if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
     defaults:
@@ -79,7 +80,6 @@ jobs:
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2
         with:
           tool: cargo-shear
-          version: 1.5.1
       - name: cargo shear
         run: cargo shear
 
@@ -106,80 +106,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15-xlarge
-            target: aarch64-apple-darwin
-            profile: dev
-          - runner: macos-15-xlarge
-            target: x86_64-apple-darwin
-            profile: dev
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-x64
-          - runner: ubuntu-24.04
+          # Keep CI on the Debian 13 x64 fleet for now. We will add dedicated
+          # macOS coverage once our own Mac runner is online, and reintroduce
+          # other architectures after we have matching self-hosted capacity.
+          - runner: debian-13-x64
             target: x86_64-unknown-linux-gnu
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-x64
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
+            runs_on: [self-hosted, Linux, X64, lxc, spacetempagency]
+          - runner: debian-13-x64
+            target: x86_64-unknown-linux-musl
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-arm64
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-arm64
-          - runner: windows-x64
-            target: x86_64-pc-windows-msvc
-            profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-x64
-          - runner: windows-arm64
-            target: aarch64-pc-windows-msvc
-            profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-arm64
-
-          # Also run representative release builds on Mac and Linux because
-          # there could be release-only build errors we want to catch.
-          # Hopefully this also pre-populates the build cache to speed up
-          # releases.
-          - runner: macos-15-xlarge
-            target: aarch64-apple-darwin
-            profile: release
-          - runner: ubuntu-24.04
+            runs_on: [self-hosted, Linux, X64, lxc, spacetempagency]
+          - runner: debian-13-x64
             target: x86_64-unknown-linux-musl
             profile: release
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-x64
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            profile: release
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-arm64
-          - runner: windows-x64
-            target: x86_64-pc-windows-msvc
-            profile: release
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-x64
-          - runner: windows-arm64
-            target: aarch64-pc-windows-msvc
-            profile: release
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-arm64
+            runs_on: [self-hosted, Linux, X64, lxc, spacetempagency]
 
     steps:
       - uses: actions/checkout@v6
@@ -469,33 +410,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15-xlarge
-            target: aarch64-apple-darwin
-            profile: dev
-          - runner: ubuntu-24.04
+          # Keep test coverage on the Debian 13 x64 fleet for now. We will add
+          # a dedicated macOS runner later, plus additional self-hosted targets
+          # once they exist and we can trust them to stay green.
+          - runner: debian-13-x64
             target: x86_64-unknown-linux-gnu
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-x64
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-arm64
-          - runner: windows-x64
-            target: x86_64-pc-windows-msvc
-            profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-x64
-          - runner: windows-arm64
-            target: aarch64-pc-windows-msvc
-            profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-arm64
+            runs_on: [self-hosted, Linux, X64, lxc, spacetempagency]
 
     steps:
       - uses: actions/checkout@v6
@@ -659,7 +580,7 @@ jobs:
     name: CI results (required)
     needs: [changed, general, cargo_shear, lint_build, tests]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, lxc, spacetempagency]
     steps:
       - name: Summarize
         shell: bash
