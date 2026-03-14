@@ -48,7 +48,8 @@ const GAMEPAD_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const GAMEPAD_REPEAT_DELAY: Duration = Duration::from_millis(250);
 const GAMEPAD_MIN_REPEAT_INTERVAL: Duration = Duration::from_millis(60);
 const GAMEPAD_MAX_REPEAT_INTERVAL: Duration = Duration::from_millis(180);
-const STICK_DEADZONE: f32 = 0.45;
+const NAV_STICK_DEADZONE: f32 = 0.45;
+const SCROLL_STICK_DEADZONE: f32 = 0.2;
 const SHOULDER_NEW_TAB_HOLD_DURATION: Duration = Duration::from_secs(2);
 
 /// Result type produced by an event source.
@@ -597,12 +598,12 @@ impl GamepadState {
             now,
         );
 
-        let left_strength = axis_strength(self.left_x, false);
-        let right_strength = axis_strength(self.left_x, true);
-        let up_strength = axis_strength(-self.left_y, true);
-        let down_strength = axis_strength(self.left_y, true);
-        let scroll_up_strength = axis_strength(-self.right_y, true);
-        let scroll_down_strength = axis_strength(self.right_y, true);
+        let left_strength = axis_strength(self.left_x, false, NAV_STICK_DEADZONE);
+        let right_strength = axis_strength(self.left_x, true, NAV_STICK_DEADZONE);
+        let up_strength = axis_strength(-self.left_y, true, NAV_STICK_DEADZONE);
+        let down_strength = axis_strength(self.left_y, true, NAV_STICK_DEADZONE);
+        let scroll_up_strength = axis_strength(-self.right_y, true, SCROLL_STICK_DEADZONE);
+        let scroll_down_strength = axis_strength(self.right_y, true, SCROLL_STICK_DEADZONE);
 
         self.repeat_up.tick(
             self.dpad_up || up_strength > 0.0,
@@ -667,17 +668,13 @@ impl GamepadState {
     }
 }
 
-fn axis_strength(value: f32, positive_direction: bool) -> f32 {
+fn axis_strength(value: f32, positive_direction: bool, deadzone: f32) -> f32 {
     let component = if positive_direction {
         value.max(0.0)
     } else {
         (-value).max(0.0)
     };
-    if component < STICK_DEADZONE {
-        0.0
-    } else {
-        component
-    }
+    if component < deadzone { 0.0 } else { component }
 }
 
 fn repeat_interval(strength: f32) -> Duration {
@@ -999,6 +996,20 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         state.set_axis(Axis::RightStickY, 0.9);
+        state.emit_repeats(&tx);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TuiEvent::Gamepad(GamepadAction::ScrollTranscriptDown))
+        ));
+    }
+
+    #[test]
+    fn right_stick_uses_smaller_deadzone_for_transcript_scroll() {
+        let mut state = GamepadState::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        state.set_axis(Axis::RightStickY, 0.3);
         state.emit_repeats(&tx);
 
         assert!(matches!(
