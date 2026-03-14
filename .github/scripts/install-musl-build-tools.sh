@@ -16,8 +16,9 @@ if [[ -n "${APT_INSTALL_ARGS:-}" ]]; then
   apt_install_args=(${APT_INSTALL_ARGS})
 fi
 
-sudo apt-get update "${apt_update_args[@]}"
-sudo apt-get install -y "${apt_install_args[@]}" ca-certificates curl musl-tools pkg-config libcap-dev g++ clang libc++-dev libc++abi-dev lld xz-utils
+as_root() { if command -v sudo >/dev/null 2>&1; then sudo "$@"; else "$@"; fi; }
+as_root apt-get update "${apt_update_args[@]}"
+as_root apt-get install -y "${apt_install_args[@]}" ca-certificates curl musl-tools pkg-config libcap-dev g++ clang libc++-dev libc++abi-dev lld xz-utils
 
 case "${TARGET}" in
   x86_64-unknown-linux-musl)

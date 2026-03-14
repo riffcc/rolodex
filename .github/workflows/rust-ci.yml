@@ -130,12 +130,13 @@ jobs:
         run: |
           set -euo pipefail
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y
+            as_root() { if command -v sudo >/dev/null 2>&1; then sudo "$@"; else "$@"; fi; }
+            as_root apt-get update -y
             packages=(pkg-config libcap-dev libasound2-dev libudev-dev)
             if [[ "${{ matrix.target }}" == 'x86_64-unknown-linux-musl' || "${{ matrix.target }}" == 'aarch64-unknown-linux-musl' ]]; then
               packages+=(libubsan1)
             fi
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+            as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
           fi
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
@@ -232,8 +233,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo mkdir -p /var/cache/apt/archives /var/lib/apt/lists
-          sudo chown -R "$USER:$USER" /var/cache/apt /var/lib/apt/lists
+          as_root() { if command -v sudo >/dev/null 2>&1; then sudo "$@"; else "$@"; fi; }
+          as_root mkdir -p /var/cache/apt/archives /var/lib/apt/lists
+          as_root chown -R "$USER:$USER" /var/cache/apt /var/lib/apt/lists
 
       - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Restore APT cache (musl)
@@ -430,8 +432,9 @@ jobs:
         run: |
           set -euo pipefail
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libasound2-dev libudev-dev
+            as_root() { if command -v sudo >/dev/null 2>&1; then sudo "$@"; else "$@"; fi; }
+            as_root apt-get update -y
+            as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libasound2-dev libudev-dev
           fi
       # Some integration tests rely on DotSlash being installed.
       # See https://github.com/openai/codex/pull/7617.
@@ -510,11 +513,12 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           # Required for bubblewrap to work on Linux CI runners.
-          sudo sysctl -w kernel.unprivileged_userns_clone=1
-          # Ubuntu 24.04+ can additionally gate unprivileged user namespaces
+          as_root() { if command -v sudo >/dev/null 2>&1; then sudo "$@"; else "$@"; fi; }
+          as_root sysctl -w kernel.unprivileged_userns_clone=1
+          # Linux runners can additionally gate unprivileged user namespaces
           # behind AppArmor.
-          if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if as_root sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+            as_root sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
       - name: tests

@@ -37,8 +37,9 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libasound2-dev libudev-dev dpkg-dev
+          as_root() { if command -v sudo >/dev/null 2>&1; then sudo "$@"; else "$@"; fi; }
+          as_root apt-get update -y
+          as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libasound2-dev libudev-dev dpkg-dev
 
       - uses: dtolnay/rust-toolchain@1.93.0
 
