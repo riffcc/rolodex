@@ -869,6 +869,7 @@ pub(crate) struct App {
     pending_primary_events: VecDeque<Event>,
     last_user_input_at: Instant,
     last_attention_switch_at: Option<Instant>,
+    last_drawn_area: Option<ratatui::layout::Rect>,
     #[cfg(feature = "voice-input")]
     handy_gamepad: HandyGamepadState,
 }
@@ -2964,6 +2965,7 @@ impl App {
             pending_primary_events: VecDeque::new(),
             last_user_input_at: Instant::now(),
             last_attention_switch_at: None,
+            last_drawn_area: None,
             #[cfg(feature = "voice-input")]
             handy_gamepad: HandyGamepadState::default(),
         };
@@ -3154,7 +3156,9 @@ impl App {
                     } else {
                         self.chat_widget.desired_height(terminal_width)
                     };
+                    let mut last_drawn_area = None;
                     tui.draw(desired_height, |frame| {
+                        last_drawn_area = Some(frame.area());
                         if let Some(split_pane) = self.split_pane.as_ref() {
                             let active_pane_id = split_pane.active_pane_id();
                             let active_thread_id = self.chat_widget.thread_id();
@@ -3194,6 +3198,7 @@ impl App {
                             }
                         }
                     })?;
+                    self.last_drawn_area = last_drawn_area;
                     if self.chat_widget.external_editor_state() == ExternalEditorState::Requested {
                         self.chat_widget
                             .set_external_editor_state(ExternalEditorState::Active);
@@ -4865,6 +4870,14 @@ impl App {
         tui.frame_requester().schedule_frame();
     }
 
+    fn active_session_area(&self) -> Option<ratatui::layout::Rect> {
+        let area = self.last_drawn_area?;
+        self.split_pane
+            .as_ref()
+            .and_then(|split_pane| split_pane.active_pane_area(area))
+            .or(Some(area))
+    }
+
     async fn handle_key_event(&mut self, tui: &mut tui::Tui, key_event: KeyEvent) {
         // Some terminals, especially on macOS, encode Option+Left/Right as Option+b/f unless
         // enhanced keyboard reporting is available. We only treat those word-motion fallbacks as
@@ -5091,6 +5104,34 @@ impl App {
                     let _ = self
                         .switch_project_workspace(tui, ProjectWorkspaceDirection::Next)
                         .await;
+                }
+                None
+            }
+            GamepadAction::ScrollTranscriptUp => {
+                if self.overlay.is_none()
+                    && self.chat_widget.no_modal_or_popup_active()
+                    && let Some(session_area) = self.active_session_area()
+                    && self.chat_widget.scroll_session_transcript_lines(
+                        session_area,
+                        &self.transcript_cells,
+                        -1,
+                    )
+                {
+                    tui.frame_requester().schedule_frame();
+                }
+                None
+            }
+            GamepadAction::ScrollTranscriptDown => {
+                if self.overlay.is_none()
+                    && self.chat_widget.no_modal_or_popup_active()
+                    && let Some(session_area) = self.active_session_area()
+                    && self.chat_widget.scroll_session_transcript_lines(
+                        session_area,
+                        &self.transcript_cells,
+                        1,
+                    )
+                {
+                    tui.frame_requester().schedule_frame();
                 }
                 None
             }
@@ -7436,6 +7477,7 @@ mod tests {
             pending_primary_events: VecDeque::new(),
             last_user_input_at: Instant::now(),
             last_attention_switch_at: None,
+            last_drawn_area: None,
             #[cfg(feature = "voice-input")]
             handy_gamepad: HandyGamepadState::default(),
         }
@@ -7503,6 +7545,7 @@ mod tests {
                 pending_primary_events: VecDeque::new(),
                 last_user_input_at: Instant::now(),
                 last_attention_switch_at: None,
+                last_drawn_area: None,
                 #[cfg(all(target_os = "linux", feature = "voice-input"))]
                 handy_gamepad: HandyGamepadState::default(),
             },

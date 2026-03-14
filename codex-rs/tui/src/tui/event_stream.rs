@@ -210,7 +210,7 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
 
     /// Poll the shared crossterm stream for the next mapped `TuiEvent`.
     ///
-    /// This skips events we don't use (mouse events, etc.) and keeps polling until it yields
+    /// This skips events we don't use and keeps polling until it yields
     /// a mapped event, hits `Pending`, or sees EOF/error. When the broker is paused, it drops
     /// the underlying stream and returns `Pending` to fully release stdin.
     pub fn poll_crossterm_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<TuiEvent>> {
@@ -304,7 +304,7 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
         }
     }
 
-    /// Map a crossterm event to a [`TuiEvent`], skipping events we don't use (mouse events, etc.).
+    /// Map a crossterm event to a [`TuiEvent`], skipping events we don't use.
     fn map_crossterm_event(&mut self, event: Event) -> Option<TuiEvent> {
         match event {
             Event::Key(key_event) => {
@@ -399,6 +399,7 @@ fn run_gamepad_event_loop(tx: mpsc::UnboundedSender<TuiEvent>) {
 struct GamepadState {
     left_x: f32,
     left_y: f32,
+    right_y: f32,
     dpad_up: bool,
     dpad_down: bool,
     dpad_left: bool,
@@ -415,6 +416,8 @@ struct GamepadState {
     repeat_down: RepeatState,
     repeat_left: RepeatState,
     repeat_right: RepeatState,
+    repeat_scroll_up: RepeatState,
+    repeat_scroll_down: RepeatState,
 }
 
 #[derive(Default)]
@@ -558,6 +561,7 @@ impl GamepadState {
         match axis {
             Axis::LeftStickX => self.left_x = value,
             Axis::LeftStickY => self.left_y = value,
+            Axis::RightStickY => self.right_y = value,
             _ => {}
         }
     }
@@ -597,6 +601,8 @@ impl GamepadState {
         let right_strength = axis_strength(self.left_x, true);
         let up_strength = axis_strength(-self.left_y, true);
         let down_strength = axis_strength(self.left_y, true);
+        let scroll_up_strength = axis_strength(-self.right_y, true);
+        let scroll_down_strength = axis_strength(self.right_y, true);
 
         self.repeat_up.tick(
             self.dpad_up || up_strength > 0.0,
@@ -624,6 +630,20 @@ impl GamepadState {
             right_strength.max(if self.dpad_right { 1.0 } else { 0.0 }),
             tx,
             TuiEvent::Gamepad(GamepadAction::Right),
+            now,
+        );
+        self.repeat_scroll_up.tick(
+            scroll_up_strength > 0.0,
+            scroll_up_strength,
+            tx,
+            TuiEvent::Gamepad(GamepadAction::ScrollTranscriptUp),
+            now,
+        );
+        self.repeat_scroll_down.tick(
+            scroll_down_strength > 0.0,
+            scroll_down_strength,
+            tx,
+            TuiEvent::Gamepad(GamepadAction::ScrollTranscriptDown),
             now,
         );
     }
@@ -971,6 +991,20 @@ mod tests {
         }
 
         assert!(saw_draw && saw_key, "expected both draw and key events");
+    }
+
+    #[test]
+    fn right_stick_repeats_transcript_scroll() {
+        let mut state = GamepadState::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        state.set_axis(Axis::RightStickY, 0.9);
+        state.emit_repeats(&tx);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TuiEvent::Gamepad(GamepadAction::ScrollTranscriptDown))
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

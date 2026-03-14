@@ -1906,6 +1906,7 @@ async fn make_chatwidget_manual(
         realtime_conversation: RealtimeConversationUiState::default(),
         last_rendered_user_message_event: None,
         project_tabs: ProjectTabsBar::default(),
+        session_transcript_scroll_top: usize::MAX,
     };
     widget.set_model(&resolved_model);
     (widget, rx, op_rx)

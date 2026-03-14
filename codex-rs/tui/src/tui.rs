@@ -254,6 +254,8 @@ pub enum GamepadAction {
     SplitPaneCreateVertical,
     ProjectWorkspacePrevious,
     ProjectWorkspaceNext,
+    ScrollTranscriptUp,
+    ScrollTranscriptDown,
     PreviousPage,
     NextPage,
     FocusNext,

@@ -45,7 +45,6 @@ use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::StatusLinePreviewData;
 use crate::bottom_pane::StatusLineSetupView;
 use crate::status::RateLimitWindowDisplay;
-use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
 use crate::task_picker;
@@ -268,6 +267,7 @@ use crate::render::renderable::RenderableExt;
 use crate::render::renderable::RenderableItem;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
+use crate::status::format_directory_display;
 use crate::status_indicator_widget::STATUS_DETAILS_DEFAULT_MAX_LINES;
 use crate::status_indicator_widget::StatusDetailsCapitalization;
 use crate::text_formatting::truncate_text;
@@ -577,6 +577,7 @@ pub(crate) struct ChatWidget {
     session_telemetry: SessionTelemetry,
     session_header: SessionHeader,
     project_tabs: ProjectTabsBar,
+    session_transcript_scroll_top: usize,
     initial_user_message: Option<UserMessage>,
     token_info: Option<TokenUsageInfo>,
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
@@ -3333,6 +3334,7 @@ impl ChatWidget {
             session_telemetry,
             session_header: SessionHeader::new(header_model),
             project_tabs: ProjectTabsBar::default(),
+            session_transcript_scroll_top: usize::MAX,
             initial_user_message,
             token_info: None,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
@@ -3521,6 +3523,7 @@ impl ChatWidget {
             session_telemetry,
             session_header: SessionHeader::new(header_model),
             project_tabs: ProjectTabsBar::default(),
+            session_transcript_scroll_top: usize::MAX,
             initial_user_message,
             token_info: None,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
@@ -3701,6 +3704,7 @@ impl ChatWidget {
             session_telemetry,
             session_header: SessionHeader::new(header_model),
             project_tabs: ProjectTabsBar::default(),
+            session_transcript_scroll_top: usize::MAX,
             initial_user_message,
             token_info: None,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
@@ -9009,12 +9013,14 @@ struct TranscriptEntry<'a> {
 
 struct SessionTranscriptRenderable<'a> {
     entries: Vec<TranscriptEntry<'a>>,
+    scroll_top: usize,
 }
 
 impl<'a> SessionTranscriptRenderable<'a> {
     fn new(
         transcript_cells: &'a [Arc<dyn HistoryCell>],
         active_cell: Option<&'a dyn HistoryCell>,
+        scroll_top: usize,
     ) -> Self {
         let mut entries = transcript_cells
             .iter()
@@ -9034,14 +9040,18 @@ impl<'a> SessionTranscriptRenderable<'a> {
                 renderable: HistoryCellRenderable { cell },
             });
         }
-        Self { entries }
+        Self {
+            entries,
+            scroll_top,
+        }
     }
 }
 
 impl Renderable for SessionTranscriptRenderable<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let total_height = self.desired_height(area.width);
-        let scroll_top = total_height.saturating_sub(area.height);
+        let max_scroll = total_height.saturating_sub(area.height);
+        let scroll_top = self.scroll_top.min(usize::from(max_scroll)) as u16;
         let visible_bottom = scroll_top.saturating_add(area.height);
         let mut virtual_y = 0u16;
 
@@ -9071,6 +9081,22 @@ impl Renderable for SessionTranscriptRenderable<'_> {
                 .saturating_add(entry.renderable.desired_height(width))
         })
     }
+}
+
+fn session_pane_layout(area: Rect, bottom_height: u16) -> (Rect, Rect) {
+    let bottom_total_height = bottom_height.saturating_add(1).min(area.height);
+    let transcript_height = area.height.saturating_sub(bottom_total_height);
+    let bottom_gap = bottom_total_height.saturating_sub(bottom_height);
+    let transcript_area = Rect::new(area.x, area.y, area.width, transcript_height);
+    let bottom_area = Rect::new(
+        area.x,
+        area.y
+            .saturating_add(transcript_height)
+            .saturating_add(bottom_gap),
+        area.width,
+        bottom_total_height.saturating_sub(bottom_gap),
+    );
+    (transcript_area, bottom_area)
 }
 
 impl ChatWidget {
@@ -9141,29 +9167,69 @@ impl ChatWidget {
         self.project_tabs.render_line_for_width(width)
     }
 
+    pub(crate) fn session_pane_areas(&self, area: Rect) -> (Rect, Rect) {
+        session_pane_layout(area, self.bottom_pane.desired_height(area.width))
+    }
+
+    pub(crate) fn scroll_session_transcript_lines(
+        &mut self,
+        area: Rect,
+        transcript_cells: &[Arc<dyn HistoryCell>],
+        delta_lines: i32,
+    ) -> bool {
+        let (transcript_area, _) = self.session_pane_areas(area);
+        if transcript_area.is_empty() {
+            return false;
+        }
+
+        let total_height = usize::from(
+            SessionTranscriptRenderable::new(
+                transcript_cells,
+                self.active_cell.as_deref(),
+                self.session_transcript_scroll_top,
+            )
+            .desired_height(transcript_area.width),
+        );
+        let max_scroll = total_height.saturating_sub(usize::from(transcript_area.height));
+        let current = if self.session_transcript_scroll_top == usize::MAX {
+            max_scroll
+        } else {
+            self.session_transcript_scroll_top.min(max_scroll)
+        };
+        let next = if delta_lines >= 0 {
+            current.saturating_add(delta_lines as usize).min(max_scroll)
+        } else {
+            current.saturating_sub(delta_lines.unsigned_abs() as usize)
+        };
+        let next_state = if next >= max_scroll { usize::MAX } else { next };
+        let changed = next_state != self.session_transcript_scroll_top;
+        self.session_transcript_scroll_top = next_state;
+        changed
+    }
+
+    pub(crate) fn reset_session_transcript_scroll(&mut self) {
+        self.session_transcript_scroll_top = usize::MAX;
+    }
+
     pub(crate) fn render_session_pane(
         &self,
         area: Rect,
         buf: &mut Buffer,
         transcript_cells: &[Arc<dyn HistoryCell>],
     ) {
-        let desired_bottom_height = self.bottom_pane.desired_height(area.width);
-        let bottom_total_height = desired_bottom_height.saturating_add(1).min(area.height);
-        let transcript_height = area.height.saturating_sub(bottom_total_height);
-        let transcript_area = Rect::new(area.x, area.y, area.width, transcript_height);
-        let bottom_gap = bottom_total_height.saturating_sub(desired_bottom_height);
-        let bottom_area = Rect::new(
-            area.x,
-            area.y
-                .saturating_add(transcript_height)
-                .saturating_add(bottom_gap),
-            area.width,
-            bottom_total_height.saturating_sub(bottom_gap),
-        );
+        let (transcript_area, bottom_area) = self.session_pane_areas(area);
 
         if !transcript_area.is_empty() {
-            SessionTranscriptRenderable::new(transcript_cells, self.active_cell.as_deref())
-                .render(transcript_area, buf);
+            SessionTranscriptRenderable::new(
+                transcript_cells,
+                self.active_cell.as_deref(),
+                if self.session_transcript_scroll_top == usize::MAX {
+                    usize::MAX
+                } else {
+                    self.session_transcript_scroll_top
+                },
+            )
+            .render(transcript_area, buf);
         }
         if !bottom_area.is_empty() {
             self.bottom_pane.render(bottom_area, buf);
@@ -9172,18 +9238,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn cursor_pos_session_pane(&self, area: Rect) -> Option<(u16, u16)> {
-        let desired_bottom_height = self.bottom_pane.desired_height(area.width);
-        let bottom_total_height = desired_bottom_height.saturating_add(1).min(area.height);
-        let transcript_height = area.height.saturating_sub(bottom_total_height);
-        let bottom_gap = bottom_total_height.saturating_sub(desired_bottom_height);
-        let bottom_area = Rect::new(
-            area.x,
-            area.y
-                .saturating_add(transcript_height)
-                .saturating_add(bottom_gap),
-            area.width,
-            bottom_total_height.saturating_sub(bottom_gap),
-        );
+        let (_, bottom_area) = self.session_pane_areas(area);
         self.bottom_pane.cursor_pos(bottom_area)
     }
 }
