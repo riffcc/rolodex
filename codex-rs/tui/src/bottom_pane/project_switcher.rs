@@ -44,6 +44,7 @@ const FOOTER_HEIGHT: u16 = 1;
 const MIN_TABS_SECTION_HEIGHT: u16 = 12;
 const MIN_FAVORITES_SECTION_HEIGHT: u16 = 8;
 const MIN_ACTIONS_SECTION_HEIGHT: u16 = 3;
+const LIST_SCROLL_STEP: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TileGridLayout {
@@ -1099,18 +1100,27 @@ impl Renderable for FavoritesEditorView {
                 })
                 .collect()
         };
+        let favorites_block = Block::default()
+            .borders(Borders::ALL)
+            .title("Favorites")
+            .border_style(if self.focused_pane == FavoritesPane::Favorites {
+                Style::default().cyan().bold()
+            } else {
+                Style::default()
+            });
+        let favorites_inner = favorites_block.inner(favorites_area);
+        favorites_block.render(favorites_area, buf);
         Paragraph::new(favorite_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Favorites")
-                    .border_style(if self.focused_pane == FavoritesPane::Favorites {
-                        Style::default().cyan().bold()
-                    } else {
-                        Style::default()
-                    }),
-            )
-            .render(favorites_area, buf);
+            .scroll((
+                u16::try_from(list_scroll_top(
+                    self.selected_favorite_idx,
+                    self.favorites.len(),
+                    favorites_inner.height as usize,
+                ))
+                .unwrap_or(u16::MAX),
+                0,
+            ))
+            .render(favorites_inner, buf);
 
         let browser_lines = if self.browser_items.is_empty() {
             vec!["No browser items.".into()]
@@ -1139,21 +1149,30 @@ impl Renderable for FavoritesEditorView {
                 })
                 .collect()
         };
+        let browser_block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(
+                "Browser: {}",
+                format_directory_display(&self.browser_root, None)
+            ))
+            .border_style(if self.focused_pane == FavoritesPane::Browser {
+                Style::default().magenta().bold()
+            } else {
+                Style::default()
+            });
+        let browser_inner = browser_block.inner(browser_area);
+        browser_block.render(browser_area, buf);
         Paragraph::new(browser_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(
-                        "Browser: {}",
-                        format_directory_display(&self.browser_root, None)
-                    ))
-                    .border_style(if self.focused_pane == FavoritesPane::Browser {
-                        Style::default().magenta().bold()
-                    } else {
-                        Style::default()
-                    }),
-            )
-            .render(browser_area, buf);
+            .scroll((
+                u16::try_from(list_scroll_top(
+                    self.selected_browser_idx,
+                    self.browser_items.len(),
+                    browser_inner.height as usize,
+                ))
+                .unwrap_or(u16::MAX),
+                0,
+            ))
+            .render(browser_inner, buf);
 
         Paragraph::new(standard_popup_hint_line()).render(footer_area, buf);
     }
@@ -1185,4 +1204,28 @@ fn list_child_directories(root: &Path) -> std::io::Result<Vec<PathBuf>> {
         .collect::<Vec<_>>();
     children.sort();
     Ok(children)
+}
+
+fn list_scroll_top(selected_idx: usize, len: usize, visible_rows: usize) -> usize {
+    if visible_rows == 0 || len <= visible_rows {
+        0
+    } else {
+        selected_idx
+            .saturating_sub(visible_rows.saturating_sub(1))
+            .min(len.saturating_sub(visible_rows))
+    }
+}
+
+fn scroll_selection(selected_idx: &mut usize, len: usize, delta: i32) {
+    if len == 0 {
+        *selected_idx = 0;
+        return;
+    }
+    if delta >= 0 {
+        *selected_idx = selected_idx
+            .saturating_add(delta as usize)
+            .min(len.saturating_sub(1));
+    } else {
+        *selected_idx = selected_idx.saturating_sub(delta.unsigned_abs() as usize);
+    }
 }

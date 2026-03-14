@@ -33,7 +33,6 @@ use ratatui::widgets::Widget;
 use super::project_switcher::FavoriteProjectTile;
 
 const PROJECT_CHOOSER_VIEW_ID: &str = "project-chooser";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectChooserPane {
     Favorites,
@@ -298,23 +297,32 @@ impl Renderable for ProjectChooserView {
                 .collect()
         };
 
+        let favorites_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(if self.focused_pane == ProjectChooserPane::Favorites {
+                BorderType::Double
+            } else {
+                BorderType::Plain
+            })
+            .title("Favorites")
+            .border_style(if self.focused_pane == ProjectChooserPane::Favorites {
+                Style::default().cyan().bold()
+            } else {
+                Style::default()
+            });
+        let favorites_inner = favorites_block.inner(favorites_area);
+        favorites_block.render(favorites_area, buf);
         Paragraph::new(favorite_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(if self.focused_pane == ProjectChooserPane::Favorites {
-                        BorderType::Double
-                    } else {
-                        BorderType::Plain
-                    })
-                    .title("Favorites")
-                    .border_style(if self.focused_pane == ProjectChooserPane::Favorites {
-                        Style::default().cyan().bold()
-                    } else {
-                        Style::default()
-                    }),
-            )
-            .render(favorites_area, buf);
+            .scroll((
+                u16::try_from(list_scroll_top(
+                    self.selected_favorite_idx,
+                    self.favorites.len(),
+                    favorites_inner.height as usize,
+                ))
+                .unwrap_or(u16::MAX),
+                0,
+            ))
+            .render(favorites_inner, buf);
 
         let browser_lines = if self.browser_items.is_empty() {
             vec!["No browser items.".into()]
@@ -344,26 +352,35 @@ impl Renderable for ProjectChooserView {
                 .collect()
         };
 
+        let browser_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(if self.focused_pane == ProjectChooserPane::Browser {
+                BorderType::Double
+            } else {
+                BorderType::Plain
+            })
+            .title(format!(
+                "Browser: {}",
+                format_directory_display(&self.browser_root, None)
+            ))
+            .border_style(if self.focused_pane == ProjectChooserPane::Browser {
+                Style::default().magenta().bold()
+            } else {
+                Style::default()
+            });
+        let browser_inner = browser_block.inner(browser_area);
+        browser_block.render(browser_area, buf);
         Paragraph::new(browser_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(if self.focused_pane == ProjectChooserPane::Browser {
-                        BorderType::Double
-                    } else {
-                        BorderType::Plain
-                    })
-                    .title(format!(
-                        "Browser: {}",
-                        format_directory_display(&self.browser_root, None)
-                    ))
-                    .border_style(if self.focused_pane == ProjectChooserPane::Browser {
-                        Style::default().magenta().bold()
-                    } else {
-                        Style::default()
-                    }),
-            )
-            .render(browser_area, buf);
+            .scroll((
+                u16::try_from(list_scroll_top(
+                    self.selected_browser_idx,
+                    self.browser_items.len(),
+                    browser_inner.height as usize,
+                ))
+                .unwrap_or(u16::MAX),
+                0,
+            ))
+            .render(browser_inner, buf);
 
         Paragraph::new(vec![
             Line::from("enter to open project"),
@@ -412,6 +429,16 @@ fn list_child_directories(root: &Path) -> std::io::Result<Vec<PathBuf>> {
         .collect::<Vec<_>>();
     children.sort();
     Ok(children)
+}
+
+fn list_scroll_top(selected_idx: usize, len: usize, visible_rows: usize) -> usize {
+    if visible_rows == 0 || len <= visible_rows {
+        0
+    } else {
+        selected_idx
+            .saturating_sub(visible_rows.saturating_sub(1))
+            .min(len.saturating_sub(visible_rows))
+    }
 }
 
 #[cfg(test)]
