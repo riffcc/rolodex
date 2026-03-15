@@ -7,8 +7,8 @@ on:
 
 jobs:
   sdks:
-    # Riff CI runs on our Debian 13 self-hosted fleet.
-    runs-on: [self-hosted, Linux, X64, lxc, spacetempagency]
+    # This job needs sudo to install system libraries for the Rust binary build.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout repository

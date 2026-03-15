@@ -8,8 +8,8 @@ on:
 
 jobs:
   build-linux-amd64:
-    # Riff packaging runs on our Debian 13 self-hosted fleet.
-    runs-on: [self-hosted, Linux, X64, lxc, spacetempagency]
+    # Packaging needs sudo to install system build dependencies.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     defaults:

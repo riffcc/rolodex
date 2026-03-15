@@ -106,21 +106,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Keep CI on the Debian 13 x64 fleet for now. We will add dedicated
-          # macOS coverage once our own Mac runner is online, and reintroduce
-          # other architectures after we have matching self-hosted capacity.
-          - runner: debian-13-x64
+          # These Linux build jobs need sudo to install system packages on the runner.
+          - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             profile: dev
-            runs_on: [self-hosted, Linux, X64, lxc, spacetempagency]
-          - runner: debian-13-x64
+            runs_on: ubuntu-24.04
+          - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             profile: dev
-            runs_on: [self-hosted, Linux, X64, lxc, spacetempagency]
-          - runner: debian-13-x64
+            runs_on: ubuntu-24.04
+          - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             profile: release
-            runs_on: [self-hosted, Linux, X64, lxc, spacetempagency]
+            runs_on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v6
