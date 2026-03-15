@@ -1692,6 +1692,13 @@
             "responses"
           ],
           "type": "string"
+        },
+        {
+          "description": "Legacy compatibility mode that translates local request construction into Responses format and still uses the Responses transport.",
+          "enum": [
+            "chat"
+          ],
+          "type": "string"
         }
       ]
     }

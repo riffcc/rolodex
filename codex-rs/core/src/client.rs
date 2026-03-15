@@ -557,6 +557,22 @@ impl ModelClientSession {
         Ok(request)
     }
 
+    fn build_responses_request_for_wire_api(
+        &self,
+        wire_api: WireApi,
+        provider: &codex_api::Provider,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<ServiceTier>,
+    ) -> Result<ResponsesApiRequest> {
+        if wire_api.translates_requests_locally() {
+            trace!("translating wire_api=chat request into Responses format locally");
+        }
+        self.build_responses_request(provider, prompt, model_info, effort, summary, service_tier)
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Builds shared Responses API transport options and request-body options.
     ///
@@ -781,8 +797,10 @@ impl ModelClientSession {
                 Self::build_streaming_telemetry(session_telemetry);
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let options = self.build_responses_options(turn_metadata_header, compression);
+            let wire_api = self.client.state.provider.wire_api;
 
-            let request = self.build_responses_request(
+            let request = self.build_responses_request_for_wire_api(
+                wire_api,
                 &client_setup.api_provider,
                 prompt,
                 model_info,
@@ -835,9 +853,11 @@ impl ModelClientSession {
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
+            let wire_api = self.client.state.provider.wire_api;
 
             let options = self.build_responses_options(turn_metadata_header, compression);
-            let request = self.build_responses_request(
+            let request = self.build_responses_request_for_wire_api(
+                wire_api,
                 &client_setup.api_provider,
                 prompt,
                 model_info,
@@ -987,7 +1007,7 @@ impl ModelClientSession {
     ) -> Result<ResponseStream> {
         let wire_api = self.client.state.provider.wire_api;
         match wire_api {
-            WireApi::Responses => {
+            WireApi::Responses | WireApi::Chat => {
                 if self.client.responses_websocket_enabled(model_info) {
                     match self
                         .stream_responses_websocket(
