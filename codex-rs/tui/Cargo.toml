@@ -117,7 +117,7 @@ tokio-util = { workspace = true, features = ["time"] }
 libc = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-handy-core = { git = "https://github.com/riffcc/Handy.git", rev = "a31587cf737803c88c7d7fe80825e1b756d48912", package = "handy-core" }
+transcribe-rs = { version = "0.2.9", features = ["parakeet"] }
 
 [target.'cfg(windows)'.dependencies]
 which = { workspace = true }

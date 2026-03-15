@@ -5415,7 +5415,7 @@ impl App {
             self.chat_widget.show_voice_overlay(
                 "Continuous Voice".to_string(),
                 Some(if cfg!(target_os = "linux") {
-                    "Back twice to stop. Speech stays local via Handy.".to_string()
+                    "Back twice to stop. Speech stays local with Parakeet V3.".to_string()
                 } else {
                     "Back twice to stop. Release Back to transcribe.".to_string()
                 }),

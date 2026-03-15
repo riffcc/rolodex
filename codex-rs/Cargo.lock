@@ -2505,7 +2505,6 @@ dependencies = [
  "dunce",
  "flate2",
  "gilrs",
- "handy-core",
  "hound",
  "image",
  "insta",
@@ -2541,6 +2540,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "transcribe-rs",
  "two-face",
  "unicode-segmentation",
  "unicode-width 0.2.1",
@@ -4480,19 +4480,6 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "zerocopy",
-]
-
-[[package]]
-name = "handy-core"
-version = "0.1.0"
-source = "git+https://github.com/riffcc/Handy.git?rev=a31587cf737803c88c7d7fe80825e1b756d48912#a31587cf737803c88c7d7fe80825e1b756d48912"
-dependencies = [
- "anyhow",
- "dirs 6.0.0",
- "once_cell",
- "serde",
- "serde_json",
- "transcribe-rs",
 ]
 
 [[package]]
