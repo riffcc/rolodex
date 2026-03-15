@@ -9,6 +9,7 @@ use crate::diff_render::display_path_for;
 use crate::key_hint;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
+use crate::tui::GamepadAction;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
 use chrono::DateTime;
@@ -234,6 +235,13 @@ async fn run_session_picker(
                             return Ok(sel);
                         }
                     }
+                    TuiEvent::Gamepad(action) => {
+                        if let Some(key) = key_event_for_gamepad_action(action)
+                            && let Some(sel) = state.handle_key(key).await?
+                        {
+                            return Ok(sel);
+                        }
+                    }
                     TuiEvent::Draw => {
                         if let Ok(size) = alt.tui.terminal.size() {
                             let list_height = size.height.saturating_sub(4) as usize;
@@ -254,6 +262,36 @@ async fn run_session_picker(
 
     // Fallback – treat as cancel/new
     Ok(SessionSelection::StartFresh)
+}
+
+fn key_event_for_gamepad_action(action: GamepadAction) -> Option<KeyEvent> {
+    match action {
+        GamepadAction::Up | GamepadAction::Left | GamepadAction::ProjectWorkspacePrevious => {
+            Some(KeyEvent::from(KeyCode::Up))
+        }
+        GamepadAction::Down | GamepadAction::Right | GamepadAction::ProjectWorkspaceNext => {
+            Some(KeyEvent::from(KeyCode::Down))
+        }
+        GamepadAction::PreviousPage
+        | GamepadAction::ProjectTabPrevious
+        | GamepadAction::SplitPaneFocusPrevious => Some(KeyEvent::from(KeyCode::PageUp)),
+        GamepadAction::NextPage
+        | GamepadAction::ProjectTabNext
+        | GamepadAction::SplitPaneFocusNext => Some(KeyEvent::from(KeyCode::PageDown)),
+        GamepadAction::Confirm | GamepadAction::Submit => Some(KeyEvent::from(KeyCode::Enter)),
+        GamepadAction::Cancel => Some(KeyEvent::from(KeyCode::Esc)),
+        GamepadAction::Context | GamepadAction::FocusNext => Some(KeyEvent::from(KeyCode::Tab)),
+        GamepadAction::OpenProjectNavigator
+        | GamepadAction::Alternate
+        | GamepadAction::ProjectNewTabLeft
+        | GamepadAction::ProjectNewTabRight
+        | GamepadAction::SplitPaneCreateHorizontal
+        | GamepadAction::SplitPaneCreateVertical
+        | GamepadAction::ScrollTranscriptUp
+        | GamepadAction::ScrollTranscriptDown
+        | GamepadAction::PushToTalkStart
+        | GamepadAction::PushToTalkStop => None,
+    }
 }
 
 /// Returns the human-readable column header for the given sort key.
@@ -1582,6 +1620,59 @@ mod tests {
         };
 
         assert_eq!(row.display_preview(), "My session");
+    }
+
+    #[test]
+    fn gamepad_navigation_actions_map_to_resume_picker_keys() {
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::Up).map(|key| key.code),
+            Some(KeyCode::Up)
+        );
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::Down).map(|key| key.code),
+            Some(KeyCode::Down)
+        );
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::Left).map(|key| key.code),
+            Some(KeyCode::Up)
+        );
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::Right).map(|key| key.code),
+            Some(KeyCode::Down)
+        );
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::ProjectWorkspacePrevious)
+                .map(|key| key.code),
+            Some(KeyCode::Up)
+        );
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::ProjectWorkspaceNext).map(|key| key.code),
+            Some(KeyCode::Down)
+        );
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::ProjectTabPrevious).map(|key| key.code),
+            Some(KeyCode::PageUp)
+        );
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::ProjectTabNext).map(|key| key.code),
+            Some(KeyCode::PageDown)
+        );
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::Confirm).map(|key| key.code),
+            Some(KeyCode::Enter)
+        );
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::Cancel).map(|key| key.code),
+            Some(KeyCode::Esc)
+        );
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::Context).map(|key| key.code),
+            Some(KeyCode::Tab)
+        );
+        assert_eq!(
+            key_event_for_gamepad_action(GamepadAction::ProjectNewTabLeft),
+            None
+        );
     }
 
     #[test]

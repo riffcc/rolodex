@@ -6081,6 +6081,26 @@ async fn slash_resume_opens_picker() {
 }
 
 #[tokio::test]
+async fn slash_attention_requests_mode_cycle() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::Attention);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::CycleAttentionMode));
+}
+
+#[tokio::test]
+async fn slash_help_displays_rolodex_tutorial() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::Help);
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected one help history cell");
+    assert_snapshot!("slash_help_output", lines_to_single_string(&cells[0]));
+}
+
+#[tokio::test]
 async fn slash_fork_requests_current_fork() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
 

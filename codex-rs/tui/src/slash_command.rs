@@ -27,6 +27,8 @@ pub enum SlashCommand {
     Rename,
     New,
     Resume,
+    Attention,
+    Help,
     Fork,
     Init,
     Compact,
@@ -74,6 +76,8 @@ impl SlashCommand {
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Rename => "rename the current thread",
             SlashCommand::Resume => "resume a saved chat",
+            SlashCommand::Attention => "cycle project attention mode",
+            SlashCommand::Help => "show a quick Rolodex tutorial",
             SlashCommand::Clear => "clear the terminal and start a new chat",
             SlashCommand::Fork => "fork the current chat",
             // SlashCommand::Undo => "ask Codex to undo a turn",
@@ -137,6 +141,8 @@ impl SlashCommand {
         match self {
             SlashCommand::New
             | SlashCommand::Resume
+            | SlashCommand::Attention
+            | SlashCommand::Help
             | SlashCommand::Fork
             | SlashCommand::Init
             | SlashCommand::Compact

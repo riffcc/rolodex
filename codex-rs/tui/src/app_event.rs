@@ -136,6 +136,8 @@ pub(crate) enum AppEvent {
         cwd: PathBuf,
     },
     /// Toggle automatic attention-driven project switching.
+    CycleAttentionMode,
+    /// Set the automatic attention-driven project switching mode.
     SetAttentionMode {
         mode: AttentionMode,
     },

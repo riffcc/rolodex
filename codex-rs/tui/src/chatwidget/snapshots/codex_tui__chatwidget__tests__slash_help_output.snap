@@ -1,0 +1,15 @@
+---
+source: tui/src/chatwidget/tests.rs
+assertion_line: 6100
+expression: "lines_to_single_string(&cells[0])"
+---
+Rolodex quick help
+
+• Rolodex keeps Codex's chat flow, but adds project-aware navigation, controller support, and faster ways to juggle multiple sessions.
+• Start by typing a request and pressing Enter. Use /new for a fresh thread, /resume to reopen an older one, and /fork to branch the current chat.
+• Compared with plain Codex, Rolodex adds favorites, project tabs, workspaces, split panes, and a project navigator so you can move across repos without losing your place.
+• Rolodex extra: /tasks opens the Palace-native task picker.
+• Resume picker controls: type to search, Tab toggles sort, Enter resumes, Esc starts fresh.
+• Resume picker on controller: D-pad, left stick, and L3/R3 browse sessions, A resumes, B starts fresh, X toggles sort.
+• Project navigator on controller: Start opens it, A resumes the selected project, X opens a fresh session there, LB/RB switch tabs, LT/RT move split focus.
+• Main UI workspace and voice controls: click L3/R3 to change workspace, and hold Select for push-to-talk when voice input is enabled.

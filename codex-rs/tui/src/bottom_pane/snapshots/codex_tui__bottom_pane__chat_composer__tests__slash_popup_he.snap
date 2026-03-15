@@ -1,0 +1,10 @@
+---
+source: tui/src/bottom_pane/chat_composer.rs
+assertion_line: 6564
+expression: terminal.backend()
+---
+"                                                            "
+"› /he                                                       "
+"                                                            "
+"                                                            "
+"  /help  show a quick Rolodex tutorial                      "

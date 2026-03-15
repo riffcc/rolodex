@@ -4088,6 +4088,55 @@ impl ChatWidget {
             SlashCommand::Resume => {
                 self.app_event_tx.send(AppEvent::OpenResumePicker);
             }
+            SlashCommand::Attention => {
+                self.app_event_tx.send(AppEvent::CycleAttentionMode);
+            }
+            SlashCommand::Help => {
+                self.add_plain_history_lines(vec![
+                    "Rolodex quick help".cyan().bold().into(),
+                    "".into(),
+                    Line::from(vec![
+                        "• ".dim(),
+                        "Rolodex keeps Codex's chat flow, but adds project-aware navigation, controller support, and faster ways to juggle multiple sessions.".into(),
+                    ]),
+                    Line::from(vec![
+                        "• ".dim(),
+                        "Start by typing a request and pressing Enter. Use ".into(),
+                        "/new".cyan(),
+                        " for a fresh thread, ".into(),
+                        "/resume".cyan(),
+                        " to reopen an older one, and ".into(),
+                        "/fork".cyan(),
+                        " to branch the current chat.".into(),
+                    ]),
+                    Line::from(vec![
+                        "• ".dim(),
+                        "Compared with plain Codex, Rolodex adds favorites, project tabs, workspaces, split panes, and a project navigator so you can move across repos without losing your place.".into(),
+                    ]),
+                    Line::from(vec![
+                        "• ".dim(),
+                        "Rolodex extra: ".into(),
+                        "/tasks".cyan(),
+                        " opens the Palace-native task picker.".into(),
+                    ]),
+                    Line::from(vec![
+                        "• ".dim(),
+                        "Resume picker controls: type to search, Tab toggles sort, Enter resumes, Esc starts fresh.".into(),
+                    ]),
+                    Line::from(vec![
+                        "• ".dim(),
+                        "Resume picker on controller: D-pad, left stick, and L3/R3 browse sessions, A resumes, B starts fresh, X toggles sort.".into(),
+                    ]),
+                    Line::from(vec![
+                        "• ".dim(),
+                        "Project navigator on controller: Start opens it, A resumes the selected project, X opens a fresh session there, LB/RB switch tabs, LT/RT move split focus.".into(),
+                    ]),
+                    Line::from(vec![
+                        "• ".dim(),
+                        "Main UI workspace and voice controls: click L3/R3 to change workspace, and hold Select for push-to-talk when voice input is enabled.".into(),
+                    ]),
+                ]);
+            }
             SlashCommand::Fork => {
                 self.app_event_tx.send(AppEvent::ForkCurrentSession);
             }

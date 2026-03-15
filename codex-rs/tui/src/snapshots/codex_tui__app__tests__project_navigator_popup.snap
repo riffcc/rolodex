@@ -1,5 +1,6 @@
 ---
 source: tui/src/app.rs
+assertion_line: 7492
 expression: popup
 ---
 Project Switcher  Workspace 1 (1/1)
@@ -20,7 +21,7 @@ Project Switcher  Workspace 1 (1/1)
 │┌─────────────────────────┐                                                             │
 ││flagship                 │                                                             │
 ││/workspace/flagship      │                                                             │
-││Press X to edit favorites│                                                             │
+││                         │                                                             │
 │└─────────────────────────┘                                                             │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘

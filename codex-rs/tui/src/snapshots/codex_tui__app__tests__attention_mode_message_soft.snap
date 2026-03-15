@@ -1,0 +1,9 @@
+---
+source: tui/src/app.rs
+assertion_line: 5681
+expression: rendered
+---
+• Attention mode is now soft.
+• off: hide attention markers and never switch projects automatically.
+• soft: show attention markers on tabs and projects, but never auto-switch.
+• on: show markers and switch to approvals or user-input threads after you've been idle for a few seconds.

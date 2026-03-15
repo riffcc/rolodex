@@ -1,17 +1,31 @@
 ---
 source: tui/src/app.rs
-assertion_line: 6473
+assertion_line: 7614
 expression: popup
 ---
-  Browse Directories
-  <ROOT>
-
-  Filter directories...
-› Open: projects                    <ROOT>
-  Favorites: Remove this directory  <ROOT>
-  Browse: ..                        <TMP>
-  Browse: codex                     <ROOT>/codex
-  Browse: dragonfly                 <ROOT>/dragonfly
-  Browse: nevercluster              <ROOT>/nevercluster
-
-  Press enter to confirm or esc to go back
+Open Project In RIGHT Tab
+Choose a favorite, or browse into a directory. Enter resumes; X starts fresh.
+<ROOT>
+╔Favorites═══════════════════════════╗┌Browser: <ROOT>──────────────────────┐
+║> projects                          ║│  .. <TMP>                                   │
+║                                    ║│  <ROOT>/codex                       │
+║                                    ║│  <ROOT>/dragonfly                   │
+║                                    ║│  <ROOT>/nevercluster                │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+║                                    ║│                                                  │
+╚════════════════════════════════════╝└──────────────────────────────────────────────────┘
+enter to resume project | x to open fresh
+right/l to browse directory | esc to cancel

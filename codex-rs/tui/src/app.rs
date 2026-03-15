@@ -150,8 +150,6 @@ use self::split_pane::SplitPaneState;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
-const PROJECT_DIRECTORY_BROWSER_VIEW_ID: &str = "project-directory-browser";
-
 /// Baseline cadence for periodic stream commit animation ticks.
 ///
 /// Smooth-mode streaming drains one line per tick, so this interval controls
@@ -241,6 +239,36 @@ fn attention_priority(level: ProjectAttentionLevel) -> u8 {
         ProjectAttentionLevel::UserInput => 1,
         ProjectAttentionLevel::Error => 2,
     }
+}
+
+fn attention_mode_lines(mode: AttentionMode) -> Vec<Line<'static>> {
+    vec![
+        vec![
+            "• ".dim(),
+            "Attention mode is now ".into(),
+            mode.label().cyan().bold(),
+            ".".into(),
+        ]
+        .into(),
+        vec![
+            "• ".dim(),
+            "off".cyan().bold(),
+            ": hide attention markers and never switch projects automatically.".into(),
+        ]
+        .into(),
+        vec![
+            "• ".dim(),
+            "soft".cyan().bold(),
+            ": show attention markers on tabs and projects, but never auto-switch.".into(),
+        ]
+        .into(),
+        vec![
+            "• ".dim(),
+            "on".cyan().bold(),
+            ": show markers and switch to approvals or user-input threads after you've been idle for a few seconds.".into(),
+        ]
+        .into(),
+    ]
 }
 
 fn clear_terminal_for_context_switch<B>(
@@ -1962,95 +1990,30 @@ impl App {
     }
 
     fn open_project_directory_browser(&mut self, root: PathBuf) {
-        let children = match list_child_directories(&root) {
-            Ok(children) => children,
-            Err(err) => {
-                let root_display = root.display();
-                self.chat_widget.add_error_message(format!(
-                    "Failed to browse directories under {root_display}: {err}"
-                ));
-                return;
-            }
-        };
-
-        let mut items = Vec::new();
-        let search_root = root.display().to_string();
-        items.push(SelectionItem {
-            name: format!("Open: {}", directory_display_name(&root)),
-            description: Some(search_root.clone()),
-            is_current: self.chat_widget.config_ref().cwd == root,
-            dismiss_on_select: true,
-            search_value: Some(format!("open {search_root}")),
-            actions: vec![Box::new({
-                let cwd = root.clone();
-                move |tx| {
-                    tx.send(AppEvent::FocusOrOpenProject { cwd: cwd.clone() });
-                }
-            })],
-            ..Default::default()
-        });
-        items.push(SelectionItem {
-            name: if self.project_navigation.is_favorite(&root) {
-                "Favorites: Remove this directory".to_string()
-            } else {
-                "Favorites: Add this directory".to_string()
-            },
-            description: Some(search_root.clone()),
-            dismiss_on_select: true,
-            search_value: Some(format!("favorite {search_root}")),
-            actions: vec![Box::new({
-                let cwd = root.clone();
-                move |tx| {
-                    tx.send(AppEvent::ToggleFavoriteProject { cwd: cwd.clone() });
-                }
-            })],
-            ..Default::default()
-        });
-
-        if let Some(parent) = root.parent() {
-            items.push(SelectionItem {
-                name: "Browse: ..".to_string(),
-                description: Some(parent.display().to_string()),
-                dismiss_on_select: true,
-                search_value: Some(parent.display().to_string()),
-                actions: vec![Box::new({
-                    let parent = parent.to_path_buf();
-                    move |tx| {
-                        tx.send(AppEvent::OpenProjectDirectoryBrowser {
-                            root: parent.clone(),
-                        });
-                    }
-                })],
-                ..Default::default()
-            });
+        if let Err(err) = list_child_directories(&root) {
+            let root_display = root.display();
+            self.chat_widget.add_error_message(format!(
+                "Failed to browse directories under {root_display}: {err}"
+            ));
+            return;
         }
 
-        for child in children {
-            let description = child.display().to_string();
-            items.push(SelectionItem {
-                name: format!("Browse: {}", directory_display_name(&child)),
-                description: Some(description.clone()),
-                dismiss_on_select: true,
-                search_value: Some(description),
-                actions: vec![Box::new(move |tx| {
-                    tx.send(AppEvent::OpenProjectDirectoryBrowser {
-                        root: child.clone(),
-                    });
-                })],
-                ..Default::default()
-            });
-        }
+        self.chat_widget
+            .show_custom_view(Box::new(ProjectChooserView::new(
+                self.app_event_tx.clone(),
+                self.build_favorite_tiles(),
+                self.project_navigation.recents().to_vec(),
+                Some(root),
+                ProjectOpenTarget::Tab(ProjectTabPlacement::Right),
+            )));
+    }
 
-        self.chat_widget.show_selection_view(SelectionViewParams {
-            view_id: Some(PROJECT_DIRECTORY_BROWSER_VIEW_ID),
-            title: Some("Browse Directories".to_string()),
-            subtitle: Some(root.display().to_string()),
-            footer_hint: Some(standard_popup_hint_line()),
-            items,
-            is_searchable: true,
-            search_placeholder: Some("Filter directories...".to_string()),
-            ..Default::default()
-        });
+    fn apply_attention_mode(&mut self, mode: AttentionMode) {
+        self.project_navigation.set_attention_mode(mode);
+        self.persist_project_navigation_state("updating attention mode");
+        self.sync_project_tabs_chrome();
+        self.chat_widget
+            .add_plain_history_lines(attention_mode_lines(mode));
     }
 
     async fn focus_or_open_project(&mut self, tui: &mut tui::Tui, cwd: PathBuf) -> Result<()> {
@@ -4511,18 +4474,11 @@ impl App {
             AppEvent::ForgetRecentProject { cwd } => {
                 self.forget_recent_project(cwd);
             }
+            AppEvent::CycleAttentionMode => {
+                self.apply_attention_mode(self.project_navigation.attention_mode().next());
+            }
             AppEvent::SetAttentionMode { mode } => {
-                self.project_navigation.set_attention_mode(mode);
-                self.persist_project_navigation_state("updating attention mode");
-                self.sync_project_tabs_chrome();
-                self.chat_widget.add_info_message(
-                    match mode {
-                        AttentionMode::Off => "Attention mode off.".to_string(),
-                        AttentionMode::Soft => "Attention mode soft.".to_string(),
-                        AttentionMode::On => "Attention mode on.".to_string(),
-                    },
-                    None,
-                );
+                self.apply_attention_mode(mode);
             }
             AppEvent::CloseProjectTab { thread_id } => {
                 self.close_project_tab(tui, thread_id).await?;
@@ -5713,6 +5669,16 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn attention_mode_message_snapshot() {
+        let rendered = attention_mode_lines(AttentionMode::Soft)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_snapshot!("attention_mode_message_soft", rendered);
     }
 
     #[test]

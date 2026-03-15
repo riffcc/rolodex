@@ -741,31 +741,33 @@ impl Renderable for ProjectSwitcherView {
                 } else {
                     Style::default().dim()
                 };
-                let description = tile
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| "Press X to edit favorites".to_string());
+                let description = tile.description.clone();
                 let title = if tile.is_open {
                     vec!["● ".magenta().bold(), tile.label.clone().magenta().bold()]
                 } else {
                     vec![tile.label.clone().into()]
                 };
-                Paragraph::new(vec![
+                let mut lines = vec![
                     Line::from(title),
                     Line::from(format_directory_display(&tile.cwd, None).dim()),
-                    Line::from(description.chars().take(140).collect::<String>().dim()),
-                ])
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(if selected {
-                            BorderType::Double
-                        } else {
-                            BorderType::Plain
-                        })
-                        .border_style(border_style),
-                )
-                .render(tile_area, tile_buf);
+                ];
+                if let Some(description) = description {
+                    lines.push(Line::from(
+                        description.chars().take(140).collect::<String>().dim(),
+                    ));
+                }
+                Paragraph::new(lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(if selected {
+                                BorderType::Double
+                            } else {
+                                BorderType::Plain
+                            })
+                            .border_style(border_style),
+                    )
+                    .render(tile_area, tile_buf);
             },
         );
 
@@ -785,6 +787,7 @@ mod tests {
     use crate::app_event::ProjectTabPlacement;
     use crate::app_event_sender::AppEventSender;
     use crate::bottom_pane::BottomPaneView;
+    use crate::bottom_pane::FavoritesEditorView;
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
@@ -883,6 +886,41 @@ mod tests {
                     && target == ProjectOpenTarget::Tab(ProjectTabPlacement::Right)
         ));
     }
+
+    #[test]
+    fn favorites_editor_confirm_on_favorite_opens_resume_picker_for_project() {
+        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let mut view = FavoritesEditorView::new(
+            AppEventSender::new(tx),
+            vec![
+                FavoriteProjectTile {
+                    cwd: PathBuf::from("/workspace/codex"),
+                    label: "codex".to_string(),
+                    description: None,
+                    is_open: true,
+                },
+                FavoriteProjectTile {
+                    cwd: PathBuf::from("/workspace/flagship"),
+                    label: "flagship".to_string(),
+                    description: None,
+                    is_open: false,
+                },
+            ],
+            vec![PathBuf::from("/workspace/dragonfly")],
+            None,
+        );
+
+        view.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(
+            rx.try_recv().expect("expected favorites editor event"),
+            AppEvent::ResumeProjectAtTarget { cwd, target }
+                if cwd == Path::new("/workspace/flagship")
+                    && target == ProjectOpenTarget::Tab(ProjectTabPlacement::Right)
+        ));
+        assert!(view.is_complete());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -976,16 +1014,19 @@ impl FavoritesEditorView {
         match self.focused_pane {
             FavoritesPane::Favorites => {
                 if let Some(tile) = self.favorites.get(self.selected_favorite_idx) {
-                    self.app_event_tx.send(AppEvent::FocusOrOpenProject {
+                    self.app_event_tx.send(AppEvent::ResumeProjectAtTarget {
                         cwd: tile.cwd.clone(),
+                        target: ProjectOpenTarget::Tab(ProjectTabPlacement::Right),
                     });
                     self.complete = true;
                 }
             }
             FavoritesPane::Browser => {
                 if let Some(path) = self.current_browser_path() {
-                    self.app_event_tx
-                        .send(AppEvent::FocusOrOpenProject { cwd: path });
+                    self.app_event_tx.send(AppEvent::ResumeProjectAtTarget {
+                        cwd: path,
+                        target: ProjectOpenTarget::Tab(ProjectTabPlacement::Right),
+                    });
                     self.complete = true;
                 }
             }
