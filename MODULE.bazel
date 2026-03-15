@@ -140,6 +140,16 @@ crate.annotation(
     workspace_cargo_toml = "rust/runfiles/Cargo.toml",
 )
 
+crate.annotation(
+    crate = "handy-core",
+    workspace_cargo_toml = "handy-core/Cargo.toml",
+)
+
+crate.annotation(
+    crate = "llm-code-sdk",
+    workspace_cargo_toml = "crates/llm-code-sdk/Cargo.toml",
+)
+
 llvm = use_extension("@llvm//extensions:llvm.bzl", "llvm")
 use_repo(llvm, "llvm-project")
 
