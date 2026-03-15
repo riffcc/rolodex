@@ -2076,6 +2076,69 @@ impl App {
         }
     }
 
+    async fn open_new_project_session_at_target(
+        &mut self,
+        tui: &mut tui::Tui,
+        cwd: PathBuf,
+        target: ProjectOpenTarget,
+    ) -> Result<()> {
+        match target {
+            ProjectOpenTarget::Tab(placement) => {
+                self.open_new_project_session_with_placement(tui, cwd, placement)
+                    .await
+            }
+            ProjectOpenTarget::SplitPane(target) => {
+                self.open_new_project_session_in_split_pane(tui, cwd, target)
+                    .await
+            }
+        }
+    }
+
+    async fn open_new_project_session_with_placement(
+        &mut self,
+        tui: &mut tui::Tui,
+        cwd: PathBuf,
+        placement: ProjectTabPlacement,
+    ) -> Result<()> {
+        let anchor_thread_id = self.current_displayed_thread_id();
+        let Some(thread_id) = self
+            .spawn_project_thread(cwd, new_tab_placement(placement), anchor_thread_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        self.select_agent_thread(tui, thread_id).await?;
+        self.refresh_in_memory_config_from_disk_best_effort("opening a fresh project tab")
+            .await;
+        self.file_search
+            .update_search_dir(self.chat_widget.config_ref().cwd.clone());
+        Ok(())
+    }
+
+    async fn open_new_project_session_in_split_pane(
+        &mut self,
+        tui: &mut tui::Tui,
+        cwd: PathBuf,
+        target: SplitPaneTarget,
+    ) -> Result<()> {
+        let Some(current_thread_id) = self.current_displayed_thread_id() else {
+            return Ok(());
+        };
+        let Some(thread_id) = self
+            .spawn_project_thread(cwd, NewTabPlacement::Right, Some(current_thread_id))
+            .await?
+        else {
+            return Ok(());
+        };
+        self.bind_split_pane_thread(current_thread_id, thread_id, target);
+        self.select_agent_thread(tui, thread_id).await?;
+        self.refresh_in_memory_config_from_disk_best_effort("opening a fresh split pane")
+            .await;
+        self.file_search
+            .update_search_dir(self.chat_widget.config_ref().cwd.clone());
+        Ok(())
+    }
+
     async fn focus_or_open_project_with_placement(
         &mut self,
         tui: &mut tui::Tui,
@@ -2100,6 +2163,118 @@ impl App {
         };
         self.select_agent_thread(tui, thread_id).await?;
         self.refresh_in_memory_config_from_disk_best_effort("opening a project tab")
+            .await;
+        self.file_search
+            .update_search_dir(self.chat_widget.config_ref().cwd.clone());
+        Ok(())
+    }
+
+    async fn resume_project_at_target(
+        &mut self,
+        tui: &mut tui::Tui,
+        cwd: PathBuf,
+        target: ProjectOpenTarget,
+    ) -> Result<()> {
+        match crate::resume_picker::run_resume_picker_for_cwd(tui, &self.config, cwd.clone())
+            .await?
+        {
+            SessionSelection::Resume(target_session) => {
+                self.resume_project_session_at_target(tui, target, target_session)
+                    .await?;
+            }
+            SessionSelection::Exit
+            | SessionSelection::StartFresh
+            | SessionSelection::ResumeWorkspace(_)
+            | SessionSelection::Fork(_) => {}
+        }
+
+        // Leaving alt-screen may blank the inline viewport; force a redraw either way.
+        tui.frame_requester().schedule_frame();
+        Ok(())
+    }
+
+    async fn resume_project_session_at_target(
+        &mut self,
+        tui: &mut tui::Tui,
+        target: ProjectOpenTarget,
+        target_session: crate::resume_picker::SessionTarget,
+    ) -> Result<()> {
+        let Some(resume_cwd) =
+            crate::read_session_cwd(&self.config, target_session.thread_id, &target_session.path)
+                .await
+        else {
+            let path_display = target_session.path.display();
+            self.chat_widget.add_error_message(format!(
+                "Failed to determine the project directory for {path_display}."
+            ));
+            return Ok(());
+        };
+
+        let mut resume_config = match self.rebuild_config_for_cwd(resume_cwd.clone()).await {
+            Ok(config) => config,
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to rebuild configuration for resumed project {}: {err}",
+                    resume_cwd.display()
+                ));
+                return Ok(());
+            }
+        };
+        self.apply_runtime_policy_overrides(&mut resume_config);
+
+        let resumed = match self
+            .server
+            .resume_thread_from_rollout(
+                resume_config,
+                target_session.path.clone(),
+                self.auth_manager.clone(),
+            )
+            .await
+        {
+            Ok(resumed) => resumed,
+            Err(err) => {
+                let path_display = target_session.path.display();
+                self.chat_widget.add_error_message(format!(
+                    "Failed to resume project session from {path_display}: {err}"
+                ));
+                return Ok(());
+            }
+        };
+
+        self.handle_thread_created(resumed.thread_id).await?;
+
+        match target {
+            ProjectOpenTarget::Tab(placement) => {
+                self.project_navigation.insert_project_thread(
+                    resumed.thread_id,
+                    resumed.session_configured.cwd.clone(),
+                    self.current_displayed_thread_id(),
+                    new_tab_placement(placement),
+                );
+            }
+            ProjectOpenTarget::SplitPane(split_target) => {
+                let Some(current_thread_id) = self.current_displayed_thread_id() else {
+                    self.chat_widget.add_error_message(
+                        "Can't resume into a split pane without an active project.".to_string(),
+                    );
+                    return Ok(());
+                };
+                self.project_navigation.insert_project_thread(
+                    resumed.thread_id,
+                    resumed.session_configured.cwd.clone(),
+                    Some(current_thread_id),
+                    NewTabPlacement::Right,
+                );
+                self.bind_split_pane_thread(current_thread_id, resumed.thread_id, split_target);
+            }
+        }
+
+        self.project_navigation
+            .record_recent(resumed.session_configured.cwd.clone());
+        self.persist_project_navigation_state("resuming a project session");
+        self.sync_project_tabs_chrome();
+        self.select_agent_thread(tui, resumed.thread_id).await?;
+        self.refresh_in_memory_config_from_disk_best_effort("resuming a project session")
             .await;
         self.file_search
             .update_search_dir(self.chat_widget.config_ref().cwd.clone());
@@ -4313,6 +4488,15 @@ impl App {
             AppEvent::FocusOrOpenProjectAtTarget { cwd, target } => {
                 self.focus_or_open_project_at_target(tui, cwd, target)
                     .await?;
+                self.sync_project_tabs_chrome();
+            }
+            AppEvent::OpenNewProjectSessionAtTarget { cwd, target } => {
+                self.open_new_project_session_at_target(tui, cwd, target)
+                    .await?;
+                self.sync_project_tabs_chrome();
+            }
+            AppEvent::ResumeProjectAtTarget { cwd, target } => {
+                self.resume_project_at_target(tui, cwd, target).await?;
                 self.sync_project_tabs_chrome();
             }
             AppEvent::ToggleFavoriteProject { cwd } => {

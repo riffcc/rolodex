@@ -110,6 +110,17 @@ pub(crate) enum AppEvent {
         cwd: PathBuf,
         target: ProjectOpenTarget,
     },
+    /// Open a fresh project session at the provided target, even if that cwd is already open.
+    OpenNewProjectSessionAtTarget {
+        cwd: PathBuf,
+        target: ProjectOpenTarget,
+    },
+    /// Open the resume picker scoped to the provided project cwd, then restore the selected
+    /// session at the provided target.
+    ResumeProjectAtTarget {
+        cwd: PathBuf,
+        target: ProjectOpenTarget,
+    },
     /// Add or remove the provided cwd from persisted favorites.
     ToggleFavoriteProject {
         cwd: PathBuf,

@@ -5,6 +5,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::app_event::AppEvent;
+use crate::app_event::ProjectOpenTarget;
+use crate::app_event::ProjectTabPlacement;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPaneView;
 use crate::bottom_pane::CancellationEvent;
@@ -295,8 +297,9 @@ impl ProjectSwitcherView {
             }
             ProjectSwitcherSection::Favorites => {
                 if let Some(tile) = self.favorites.get(self.selected_favorite_idx) {
-                    self.app_event_tx.send(AppEvent::FocusOrOpenProject {
+                    self.app_event_tx.send(AppEvent::ResumeProjectAtTarget {
                         cwd: tile.cwd.clone(),
+                        target: ProjectOpenTarget::Tab(ProjectTabPlacement::Right),
                     });
                     self.complete = true;
                 }
@@ -316,13 +319,14 @@ impl ProjectSwitcherView {
                 }
             }
             ProjectSwitcherSection::Favorites => {
-                let initial_path = self
-                    .favorites
-                    .get(self.selected_favorite_idx)
-                    .map(|tile| tile.cwd.clone());
-                self.app_event_tx
-                    .send(AppEvent::OpenProjectFavoritesManager { initial_path });
-                self.complete = true;
+                if let Some(tile) = self.favorites.get(self.selected_favorite_idx) {
+                    self.app_event_tx
+                        .send(AppEvent::OpenNewProjectSessionAtTarget {
+                            cwd: tile.cwd.clone(),
+                            target: ProjectOpenTarget::Tab(ProjectTabPlacement::Right),
+                        });
+                    self.complete = true;
+                }
             }
             ProjectSwitcherSection::Actions => self.run_action(),
         }
@@ -777,14 +781,24 @@ mod tests {
     use super::TileGridLayout;
     use crate::app::AttentionMode;
     use crate::app_event::AppEvent;
+    use crate::app_event::ProjectOpenTarget;
+    use crate::app_event::ProjectTabPlacement;
     use crate::app_event_sender::AppEventSender;
+    use crate::bottom_pane::BottomPaneView;
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
+    use crossterm::event::KeyModifiers;
     use pretty_assertions::assert_eq;
+    use std::path::Path;
     use std::path::PathBuf;
     use tokio::sync::mpsc::unbounded_channel;
 
-    fn make_view() -> ProjectSwitcherView {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
-        ProjectSwitcherView::new(
+    fn make_view() -> (
+        ProjectSwitcherView,
+        tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    ) {
+        let (tx, rx) = unbounded_channel::<AppEvent>();
+        let view = ProjectSwitcherView::new(
             AppEventSender::new(tx),
             "Workspace 1".to_string(),
             0,
@@ -798,7 +812,8 @@ mod tests {
                 is_open: false,
             }],
             PathBuf::from("/workspace/codex"),
-        )
+        );
+        (view, rx)
     }
 
     #[test]
@@ -827,7 +842,7 @@ mod tests {
 
     #[test]
     fn action_grid_layout_wraps_when_width_is_narrow() {
-        let view = make_view();
+        let (view, _rx) = make_view();
 
         assert_eq!(
             view.action_grid_layout(58),
@@ -837,6 +852,36 @@ mod tests {
                 tile_width: 13,
             }
         );
+    }
+
+    #[test]
+    fn confirm_on_favorite_opens_resume_picker_for_project() {
+        let (mut view, mut rx) = make_view();
+
+        view.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(
+            rx.try_recv().expect("expected switcher event"),
+            AppEvent::ResumeProjectAtTarget { cwd, target }
+                if cwd == Path::new("/workspace/flagship")
+                    && target == ProjectOpenTarget::Tab(ProjectTabPlacement::Right)
+        ));
+    }
+
+    #[test]
+    fn context_on_favorite_opens_fresh_session_for_project() {
+        let (mut view, mut rx) = make_view();
+
+        view.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        view.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert!(matches!(
+            rx.try_recv().expect("expected switcher event"),
+            AppEvent::OpenNewProjectSessionAtTarget { cwd, target }
+                if cwd == Path::new("/workspace/flagship")
+                    && target == ProjectOpenTarget::Tab(ProjectTabPlacement::Right)
+        ));
     }
 }
 

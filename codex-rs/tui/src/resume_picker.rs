@@ -132,7 +132,27 @@ pub async fn run_resume_picker(
     config: &Config,
     show_all: bool,
 ) -> Result<SessionSelection> {
-    run_session_picker(tui, config, show_all, SessionPickerAction::Resume).await
+    let filter_cwd = if show_all {
+        None
+    } else {
+        std::env::current_dir().ok()
+    };
+    run_session_picker(
+        tui,
+        config,
+        show_all,
+        filter_cwd,
+        SessionPickerAction::Resume,
+    )
+    .await
+}
+
+pub(crate) async fn run_resume_picker_for_cwd(
+    tui: &mut Tui,
+    config: &Config,
+    cwd: PathBuf,
+) -> Result<SessionSelection> {
+    run_session_picker(tui, config, false, Some(cwd), SessionPickerAction::Resume).await
 }
 
 pub async fn run_fork_picker(
@@ -140,13 +160,19 @@ pub async fn run_fork_picker(
     config: &Config,
     show_all: bool,
 ) -> Result<SessionSelection> {
-    run_session_picker(tui, config, show_all, SessionPickerAction::Fork).await
+    let filter_cwd = if show_all {
+        None
+    } else {
+        std::env::current_dir().ok()
+    };
+    run_session_picker(tui, config, show_all, filter_cwd, SessionPickerAction::Fork).await
 }
 
 async fn run_session_picker(
     tui: &mut Tui,
     config: &Config,
     show_all: bool,
+    filter_cwd: Option<PathBuf>,
     action: SessionPickerAction,
 ) -> Result<SessionSelection> {
     let alt = AltScreenGuard::enter(tui);
@@ -154,11 +180,6 @@ async fn run_session_picker(
 
     let default_provider = config.model_provider_id.to_string();
     let codex_home = config.codex_home.as_path();
-    let filter_cwd = if show_all {
-        None
-    } else {
-        std::env::current_dir().ok()
-    };
 
     let config = config.clone();
     let loader_tx = bg_tx.clone();

@@ -3,7 +3,7 @@ source: tui/src/bottom_pane/project_chooser.rs
 expression: "render_snapshot(&view, 80)"
 ---
 Open Project In RIGHT Tab                                                       
-Choose a favorite, or browse into a directory and press Enter.                  
+Choose a favorite, or browse into a directory. Enter resumes; X starts fresh.   
 /workspace                                                                      
 ╔Favorites═══════════════════════╗┌Browser: /workspace─────────────────────────┐
 ║> ● codex                       ║│  .. /                                      │
@@ -26,5 +26,5 @@ Choose a favorite, or browse into a directory and press Enter.
 ║                                ║│                                            │
 ║                                ║│                                            │
 ╚════════════════════════════════╝└────────────────────────────────────────────┘
-enter to open project                                                           
-x to browse directory | esc to cancel
+enter to resume project | x to open fresh                                       
+right/l to browse directory | esc to cancel

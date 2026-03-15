@@ -114,8 +114,16 @@ impl ProjectChooserView {
     }
 
     fn open_project(&mut self, cwd: PathBuf) {
+        self.app_event_tx.send(AppEvent::ResumeProjectAtTarget {
+            cwd,
+            target: self.target,
+        });
+        self.complete = true;
+    }
+
+    fn open_new_session(&mut self, cwd: PathBuf) {
         self.app_event_tx
-            .send(AppEvent::FocusOrOpenProjectAtTarget {
+            .send(AppEvent::OpenNewProjectSessionAtTarget {
                 cwd,
                 target: self.target,
             });
@@ -190,7 +198,13 @@ impl BottomPaneView for ProjectChooserView {
                 code: KeyCode::Char('l'),
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.focused_pane = ProjectChooserPane::Browser,
+            } => {
+                if self.focused_pane == ProjectChooserPane::Browser {
+                    self.browse_deeper();
+                } else {
+                    self.focused_pane = ProjectChooserPane::Browser;
+                }
+            }
             KeyEvent {
                 code: KeyCode::Up, ..
             }
@@ -234,7 +248,18 @@ impl BottomPaneView for ProjectChooserView {
                 code: KeyCode::Char('x'),
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.browse_deeper(),
+            } => match self.focused_pane {
+                ProjectChooserPane::Favorites => {
+                    if let Some(tile) = self.favorites.get(self.selected_favorite_idx) {
+                        self.open_new_session(tile.cwd.clone());
+                    }
+                }
+                ProjectChooserPane::Browser => {
+                    if let Some(path) = self.current_browser_path() {
+                        self.open_new_session(path);
+                    }
+                }
+            },
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => self.complete = true,
@@ -268,7 +293,10 @@ impl Renderable for ProjectChooserView {
 
         Paragraph::new(vec![
             Line::from(self.target_title()).bold(),
-            Line::from("Choose a favorite, or browse into a directory and press Enter.".dim()),
+            Line::from(
+                "Choose a favorite, or browse into a directory. Enter resumes; X starts fresh."
+                    .dim(),
+            ),
             Line::from(format_directory_display(&self.browser_root, None).dim()),
         ])
         .render(header_area, buf);
@@ -383,8 +411,8 @@ impl Renderable for ProjectChooserView {
             .render(browser_inner, buf);
 
         Paragraph::new(vec![
-            Line::from("enter to open project"),
-            Line::from("x to browse directory | esc to cancel").dim(),
+            Line::from("enter to resume project | x to open fresh"),
+            Line::from("right/l to browse directory | esc to cancel").dim(),
         ])
         .render(footer_area, buf);
     }
@@ -507,7 +535,22 @@ mod tests {
 
         assert!(matches!(
             rx.try_recv().expect("expected chooser event"),
-            AppEvent::FocusOrOpenProjectAtTarget { cwd, target }
+            AppEvent::ResumeProjectAtTarget { cwd, target }
+                if cwd == Path::new("/workspace/codex")
+                    && target == ProjectOpenTarget::Tab(ProjectTabPlacement::Right)
+        ));
+        assert!(view.is_complete());
+    }
+
+    #[test]
+    fn project_chooser_context_opens_fresh_session_for_selected_favorite() {
+        let (mut view, mut rx) = make_view();
+
+        view.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert!(matches!(
+            rx.try_recv().expect("expected chooser event"),
+            AppEvent::OpenNewProjectSessionAtTarget { cwd, target }
                 if cwd == Path::new("/workspace/codex")
                     && target == ProjectOpenTarget::Tab(ProjectTabPlacement::Right)
         ));
