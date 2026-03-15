@@ -106,19 +106,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # These Linux build jobs need sudo to install system packages on the runner.
-          - runner: ubuntu-24.04
+          # Route Linux build jobs through the ghrunner01..10 Debian 13 fleet.
+          - runner: debian-13-x64
             target: x86_64-unknown-linux-gnu
             profile: dev
-            runs_on: ubuntu-24.04
-          - runner: ubuntu-24.04
+            runs_on: [self-hosted, Linux, X64, lxc, spacetempagency]
+          - runner: debian-13-x64
             target: x86_64-unknown-linux-musl
             profile: dev
-            runs_on: ubuntu-24.04
-          - runner: ubuntu-24.04
+            runs_on: [self-hosted, Linux, X64, lxc, spacetempagency]
+          - runner: debian-13-x64
             target: x86_64-unknown-linux-musl
             profile: release
-            runs_on: ubuntu-24.04
+            runs_on: [self-hosted, Linux, X64, lxc, spacetempagency]
 
     steps:
       - uses: actions/checkout@v6
@@ -422,9 +422,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Keep test coverage on the Debian 13 x64 fleet for now. We will add
-          # a dedicated macOS runner later, plus additional self-hosted targets
-          # once they exist and we can trust them to stay green.
+          # Route Linux test jobs through the ghrunner01..10 Debian 13 fleet.
           - runner: debian-13-x64
             target: x86_64-unknown-linux-gnu
             profile: dev
