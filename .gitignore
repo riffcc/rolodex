@@ -41,8 +41,11 @@ AGENTS.override.md
 .nyc_output/
 .jest/
 *.tsbuildinfo
+/.codex/bazel/
+/.codex/bazelisk/
 /.codex/target/
 /.codex/tools/
+/codex-rs/.codex/local-proxy-certs/
 /codex-rs/tui/src/.palace/
 
 # logs
