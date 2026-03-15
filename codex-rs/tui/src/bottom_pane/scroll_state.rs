@@ -62,6 +62,40 @@ impl ScrollState {
         });
     }
 
+    /// Move selection up by one page, clamping at the first item.
+    pub fn move_up_page(&mut self, len: usize, page_size: usize) {
+        if len == 0 {
+            self.selected_idx = None;
+            self.scroll_top = 0;
+            return;
+        }
+
+        let page_size = page_size.max(1);
+        self.selected_idx = Some(
+            self.selected_idx
+                .unwrap_or(0)
+                .saturating_sub(page_size)
+                .min(len - 1),
+        );
+    }
+
+    /// Move selection down by one page, clamping at the last item.
+    pub fn move_down_page(&mut self, len: usize, page_size: usize) {
+        if len == 0 {
+            self.selected_idx = None;
+            self.scroll_top = 0;
+            return;
+        }
+
+        let page_size = page_size.max(1);
+        self.selected_idx = Some(
+            self.selected_idx
+                .unwrap_or(0)
+                .saturating_add(page_size)
+                .min(len - 1),
+        );
+    }
+
     /// Adjust `scroll_top` so that the current `selected_idx` is visible within
     /// the window of `visible_rows`.
     pub fn ensure_visible(&mut self, len: usize, visible_rows: usize) {
@@ -108,6 +142,34 @@ mod tests {
         }
 
         s.move_down_wrap(len);
+        s.ensure_visible(len, vis);
+        assert_eq!(s.selected_idx, Some(0));
+        assert_eq!(s.scroll_top, 0);
+    }
+
+    #[test]
+    fn page_navigation_clamps_to_bounds() {
+        let mut s = ScrollState::new();
+        let len = 10;
+        let vis = 5;
+
+        s.clamp_selection(len);
+        s.move_down_page(len, vis);
+        s.ensure_visible(len, vis);
+        assert_eq!(s.selected_idx, Some(5));
+        assert_eq!(s.scroll_top, 1);
+
+        s.move_down_page(len, vis);
+        s.ensure_visible(len, vis);
+        assert_eq!(s.selected_idx, Some(9));
+        assert_eq!(s.scroll_top, 5);
+
+        s.move_up_page(len, vis);
+        s.ensure_visible(len, vis);
+        assert_eq!(s.selected_idx, Some(4));
+        assert_eq!(s.scroll_top, 4);
+
+        s.move_up_page(len, vis);
         s.ensure_visible(len, vis);
         assert_eq!(s.selected_idx, Some(0));
         assert_eq!(s.scroll_top, 0);

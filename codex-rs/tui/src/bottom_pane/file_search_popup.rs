@@ -91,6 +91,20 @@ impl FileSearchPopup {
         self.state.ensure_visible(len, len.min(MAX_POPUP_ROWS));
     }
 
+    pub(crate) fn page_up(&mut self) {
+        let len = self.matches.len();
+        let visible = len.clamp(1, MAX_POPUP_ROWS);
+        self.state.move_up_page(len, visible);
+        self.state.ensure_visible(len, visible);
+    }
+
+    pub(crate) fn page_down(&mut self) {
+        let len = self.matches.len();
+        let visible = len.clamp(1, MAX_POPUP_ROWS);
+        self.state.move_down_page(len, visible);
+        self.state.ensure_visible(len, visible);
+    }
+
     pub(crate) fn selected_match(&self) -> Option<&PathBuf> {
         self.state
             .selected_idx

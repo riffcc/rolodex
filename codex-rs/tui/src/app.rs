@@ -7486,8 +7486,11 @@ mod tests {
 
     #[tokio::test]
     async fn project_directory_browser_popup_snapshot() -> Result<()> {
-        let root = tempdir()?;
-        let root_path = root.path().join("projects");
+        let snapshot_root = PathBuf::from("target/pdb");
+        if snapshot_root.exists() {
+            std::fs::remove_dir_all(&snapshot_root)?;
+        }
+        let root_path = snapshot_root.join("projects");
         std::fs::create_dir_all(root_path.join("codex"))?;
         std::fs::create_dir_all(root_path.join("dragonfly"))?;
         std::fs::create_dir_all(root_path.join("nevercluster"))?;
@@ -7498,8 +7501,9 @@ mod tests {
 
         let popup = render_bottom_popup(&app.chat_widget, 90)
             .replace(&root_path.display().to_string(), "<ROOT>")
-            .replace(&root.path().display().to_string(), "<TMP>");
+            .replace(&snapshot_root.display().to_string(), "<TMP>");
         assert_snapshot!("project_directory_browser_popup", popup);
+        std::fs::remove_dir_all(&snapshot_root)?;
         Ok(())
     }
 

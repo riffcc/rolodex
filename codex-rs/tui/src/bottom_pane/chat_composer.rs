@@ -1684,6 +1684,20 @@ impl ChatComposer {
                 (InputResult::None, true)
             }
             KeyEvent {
+                code: KeyCode::Left | KeyCode::PageUp,
+                ..
+            } => {
+                popup.page_up();
+                (InputResult::None, true)
+            }
+            KeyEvent {
+                code: KeyCode::Right | KeyCode::PageDown,
+                ..
+            } => {
+                popup.page_down();
+                (InputResult::None, true)
+            }
+            KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
                 // Hide popup without modifying text, remember token to avoid immediate reopen.
@@ -7225,6 +7239,43 @@ mod tests {
             }
             _ => panic!("expected Submitted"),
         }
+    }
+
+    #[test]
+    fn file_popup_right_arrow_pages_down() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.insert_str("@f");
+        composer.on_file_search_result(
+            "f".to_string(),
+            (1..=9)
+                .map(|idx| FileMatch {
+                    score: idx,
+                    path: PathBuf::from(format!("src/file_{idx}.rs")),
+                    root: PathBuf::from("/workspace"),
+                    indices: None,
+                })
+                .collect(),
+        );
+
+        let (_result, _needs_redraw) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let (_result, _needs_redraw) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(composer.textarea.text(), "src/file_9.rs ");
     }
 
     /// Behavior: multiple paste operations can coexist; placeholders should be expanded to their

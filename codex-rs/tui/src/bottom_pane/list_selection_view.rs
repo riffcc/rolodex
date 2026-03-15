@@ -429,6 +429,30 @@ impl ListSelectionView {
         }
     }
 
+    fn page_up(&mut self) {
+        let before = self.selected_actual_idx();
+        let len = self.visible_len();
+        let visible = Self::max_visible_rows(len);
+        self.state.move_up_page(len, visible);
+        self.state.ensure_visible(len, visible);
+        self.skip_disabled_up();
+        if self.selected_actual_idx() != before {
+            self.fire_selection_changed();
+        }
+    }
+
+    fn page_down(&mut self) {
+        let before = self.selected_actual_idx();
+        let len = self.visible_len();
+        let visible = Self::max_visible_rows(len);
+        self.state.move_down_page(len, visible);
+        self.state.ensure_visible(len, visible);
+        self.skip_disabled_down();
+        if self.selected_actual_idx() != before {
+            self.fire_selection_changed();
+        }
+    }
+
     fn fire_selection_changed(&self) {
         if let Some(cb) = &self.on_selection_changed
             && let Some(actual) = self.selected_actual_idx()
@@ -610,6 +634,14 @@ impl BottomPaneView for ListSelectionView {
                 modifiers: KeyModifiers::NONE,
                 ..
             } /* ^N */ => self.move_down(),
+            KeyEvent {
+                code: KeyCode::Left | KeyCode::PageUp,
+                ..
+            } => self.page_up(),
+            KeyEvent {
+                code: KeyCode::Right | KeyCode::PageDown,
+                ..
+            } => self.page_down(),
             KeyEvent {
                 code: KeyCode::Char('j'),
                 modifiers: KeyModifiers::NONE,
@@ -1351,6 +1383,32 @@ mod tests {
             rx.try_recv().is_err(),
             "moving down in a single-item list should not fire on_selection_changed",
         );
+    }
+
+    #[test]
+    fn right_arrow_pages_down_in_long_lists() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let items: Vec<SelectionItem> = (1..=9)
+            .map(|idx| SelectionItem {
+                name: format!("Item {idx}"),
+                dismiss_on_select: true,
+                ..Default::default()
+            })
+            .collect();
+        let mut view = ListSelectionView::new(
+            SelectionViewParams {
+                items,
+                ..Default::default()
+            },
+            tx,
+        );
+
+        view.handle_key_event(KeyEvent::from(KeyCode::Right));
+        assert_eq!(view.selected_index(), Some(8));
+
+        view.handle_key_event(KeyEvent::from(KeyCode::Left));
+        assert_eq!(view.selected_index(), Some(0));
     }
 
     #[test]
