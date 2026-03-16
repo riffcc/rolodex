@@ -1,3 +1,12 @@
+# Rolodex (Riff Labs fork of Codex)
+
+## Versioning
+
+Rolodex versions follow upstream Codex versioning with a `-riffX` suffix where
+`X` is the patch number of our changes on top of that upstream version. For
+example, if upstream is `0.1.0` and we've made 3 patches, the Rolodex version
+is `0.1.0-riff3`. When upstream bumps to `0.1.1`, we reset to `0.1.1-riff1`.
+
 # Rust/codex-rs
 
 In the codex-rs folder where the rust code lives:

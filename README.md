@@ -10,6 +10,25 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 
 ---
 
+## Rolodex
+
+**This fork is Rolodex** — the [Riff Labs](https://riff.cc) distribution of Codex CLI.
+
+### Why Rolodex?
+
+Codex is an excellent foundation, but it's built around a single provider (OpenAI) and a single interaction model (text-in, text-out). Rolodex takes the Codex core and pushes it in directions that matter for real-world, multi-provider agent work:
+
+- **Voice-first interaction.** Rolodex integrates the [Handy.computer](https://handy.computer) voice-to-text engine, making it possible to drive your coding agent by speaking naturally instead of typing. This isn't a wrapper around a generic STT API — it's purpose-built for developer workflows where you're dictating code intent, describing bugs, or narrating architectural decisions while your hands are busy.
+- **Provider-agnostic by default.** Where Codex assumes OpenAI, Rolodex is built to work across providers out of the box — Anthropic Claude, local models via Ollama and LM Studio, and any OpenAI-compatible endpoint. The model routing and chat compatibility layers are first-class, not bolted on.
+- **Opinionated packaging.** Rolodex ships as a single binary (`rolodex`) with `.deb` packages for Debian/Ubuntu, prerelease builds on every push to main, and stable releases cut from tags. No npm required if you don't want it.
+- **Community-driven.** Codex development is driven by OpenAI's priorities. Rolodex development is driven by what working developers actually need — and we accept contributions from everyone.
+
+### Acknowledgements
+
+Voice-to-text engine integrations in Rolodex are powered by **[Handy.computer](https://handy.computer)**. Their work on low-latency, developer-aware speech recognition makes voice-first coding actually practical — not a novelty, but a genuine productivity multiplier. We're grateful for their partnership and their commitment to building tools that meet developers where they are.
+
+---
+
 ## Quickstart
 
 ### Installing and running Codex CLI

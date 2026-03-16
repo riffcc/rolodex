@@ -62,7 +62,7 @@ image = { workspace = true, features = ["jpeg", "png", "gif", "webp"] }
 itertools = { workspace = true }
 lazy_static = { workspace = true }
 pathdiff = { workspace = true }
-palace-plane = { git = "https://github.com/riffcc/palace.git", rev = "ef7ee97f71c833d2963f1fe922840ce709f6b79b", package = "palace-plane" }
+palace-plane = { git = "https://github.com/riffcc/palace.git", rev = "e25b68d33f94f592e13aa9d8d75a811b596b18a8", package = "palace-plane" }
 pulldown-cmark = { workspace = true }
 rand = { workspace = true }
 ratatui = { workspace = true, features = [

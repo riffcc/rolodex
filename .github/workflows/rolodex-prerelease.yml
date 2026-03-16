@@ -56,7 +56,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.93.0
 
       - name: Cargo build Rolodex
-        run: cargo build --release --bin codex
+        run: cargo build --release --bin rolodex
 
       - name: Prepare artifact names
         id: names
@@ -64,8 +64,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp codex-rs/target/release/codex "dist/rolodex-linux-amd64-${{ steps.version.outputs.prerelease }}"
-          ./scripts/build-rolodex-deb.sh "${{ steps.version.outputs.debian }}" codex-rs/target/release/codex dist
+          cp codex-rs/target/release/rolodex "dist/rolodex-linux-amd64-${{ steps.version.outputs.prerelease }}"
+          ./scripts/build-rolodex-deb.sh "${{ steps.version.outputs.debian }}" codex-rs/target/release/rolodex dist
           echo "binary=dist/rolodex-linux-amd64-${{ steps.version.outputs.prerelease }}" >> "$GITHUB_OUTPUT"
           echo "deb=dist/rolodex_${{ steps.version.outputs.debian }}_amd64.deb" >> "$GITHUB_OUTPUT"
 

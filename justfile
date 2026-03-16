@@ -5,14 +5,14 @@ set positional-arguments
 help:
     just -l
 
-# `codex`
-alias c := codex
-codex *args:
-    cargo run --bin codex -- "$@"
+# `rolodex`
+alias c := rolodex
+rolodex *args:
+    cargo run --bin rolodex -- "$@"
 
-# `codex exec`
+# `rolodex exec`
 exec *args:
-    cargo run --bin codex -- exec "$@"
+    cargo run --bin rolodex -- exec "$@"
 
 # Run the CLI version of the file-search crate.
 file-search *args:
@@ -21,7 +21,7 @@ file-search *args:
 # Build the CLI and run the app-server test client
 app-server-test-client *args:
     cargo build -p codex-cli
-    cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex "$@"
+    cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/rolodex "$@"
 
 # format code
 fmt:

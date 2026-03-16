@@ -5621,7 +5621,7 @@ checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 [[package]]
 name = "llm-code-sdk"
 version = "0.1.0"
-source = "git+https://github.com/riffcc/palace.git?rev=ef7ee97f71c833d2963f1fe922840ce709f6b79b#ef7ee97f71c833d2963f1fe922840ce709f6b79b"
+source = "git+https://github.com/riffcc/llm-code-sdk.git?rev=0ef455f86e2f8dbdb292c092d9ebeb0966b214b9#0ef455f86e2f8dbdb292c092d9ebeb0966b214b9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6296,7 +6296,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.21.7",
  "chrono",
  "getrandom 0.2.17",
  "http 1.4.0",
@@ -6800,7 +6800,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.45.0",
 ]
 
 [[package]]
@@ -6816,7 +6816,7 @@ dependencies = [
 [[package]]
 name = "palace-plane"
 version = "0.1.0"
-source = "git+https://github.com/riffcc/palace.git?rev=ef7ee97f71c833d2963f1fe922840ce709f6b79b#ef7ee97f71c833d2963f1fe922840ce709f6b79b"
+source = "git+https://github.com/riffcc/palace.git?rev=e25b68d33f94f592e13aa9d8d75a811b596b18a8#e25b68d33f94f592e13aa9d8d75a811b596b18a8"
 dependencies = [
  "anyhow",
  "async-trait",

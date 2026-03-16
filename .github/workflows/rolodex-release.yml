@@ -58,15 +58,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.93.0
 
       - name: Cargo build Rolodex
-        run: cargo build --release --bin codex
+        run: cargo build --release --bin rolodex
 
       - name: Prepare release artifacts
         working-directory: .
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp codex-rs/target/release/codex "dist/rolodex-linux-amd64-${{ steps.version.outputs.stable }}"
-          ./scripts/build-rolodex-deb.sh "${{ steps.version.outputs.debian }}" codex-rs/target/release/codex dist
+          cp codex-rs/target/release/rolodex "dist/rolodex-linux-amd64-${{ steps.version.outputs.stable }}"
+          ./scripts/build-rolodex-deb.sh "${{ steps.version.outputs.debian }}" codex-rs/target/release/rolodex dist
 
       - name: Publish Rolodex release
         uses: softprops/action-gh-release@v2

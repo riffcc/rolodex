@@ -56,7 +56,7 @@ codex-secrets = { workspace = true }
 codex-utils-string = { workspace = true }
 codex-utils-stream-parser = { workspace = true }
 codex-windows-sandbox = { package = "codex-windows-sandbox", path = "../windows-sandbox-rs" }
-llm-code-sdk = { git = "https://github.com/riffcc/palace.git", rev = "ef7ee97f71c833d2963f1fe922840ce709f6b79b", package = "llm-code-sdk", features = ["smart"] }
+llm-code-sdk = { git = "https://github.com/riffcc/llm-code-sdk.git", rev = "0ef455f86e2f8dbdb292c092d9ebeb0966b214b9", features = ["smart"] }
 csv = { workspace = true }
 dirs = { workspace = true }
 dunce = { workspace = true }

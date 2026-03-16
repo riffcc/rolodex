@@ -147,7 +147,13 @@ crate.annotation(
 
 crate.annotation(
     crate = "llm-code-sdk",
-    workspace_cargo_toml = "crates/llm-code-sdk/Cargo.toml",
+    workspace_cargo_toml = "Cargo.toml",
+)
+
+crate.annotation(
+    crate = "palace-plane",
+    workspace_cargo_toml = "Cargo.toml",
+    strip_prefix = "crates/palace-plane",
 )
 
 llvm = use_extension("@llvm//extensions:llvm.bzl", "llvm")

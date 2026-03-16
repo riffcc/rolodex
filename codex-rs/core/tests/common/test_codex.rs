@@ -234,13 +234,13 @@ impl TestCodexBuilder {
         for hook in self.pre_build_hooks.drain(..) {
             hook(home.path());
         }
-        if let Ok(path) = codex_utils_cargo_bin::cargo_bin("codex") {
+        if let Ok(path) = codex_utils_cargo_bin::cargo_bin("rolodex") {
             config.codex_linux_sandbox_exe = Some(path);
         } else if let Ok(exe) = std::env::current_exe()
             && let Some(path) = exe
                 .parent()
                 .and_then(|parent| parent.parent())
-                .map(|parent| parent.join("codex"))
+                .map(|parent| parent.join("rolodex"))
             && path.is_file()
         {
             config.codex_linux_sandbox_exe = Some(path);
