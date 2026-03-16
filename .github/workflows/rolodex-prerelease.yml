@@ -7,20 +7,16 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-linux-amd64:
-    # Packaging needs sudo to install system build dependencies.
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    defaults:
-      run:
-        working-directory: codex-rs
+  version:
+    runs-on: [self-hosted, Linux, X64, lxc, spacetempagency]
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      debian: ${{ steps.version.outputs.debian }}
+      sha: ${{ steps.version.outputs.sha }}
     steps:
       - uses: actions/checkout@v6
-
       - name: Compute Rolodex prerelease version
         id: version
-        working-directory: .
         run: |
           set -euo pipefail
           PRE="$(./scripts/rolodex-version.py --format prerelease)"
@@ -30,20 +26,34 @@ jobs:
           echo "debian=$DEB" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
+  build-linux-amd64:
+    needs: version
+    runs-on: [self-hosted, Linux, X64, lxc, spacetempagency]
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v6
+
       - name: Stamp Cargo workspace version for this build
         working-directory: .
-        run: ./scripts/set-workspace-version.py "${{ steps.version.outputs.prerelease }}"
+        run: ./scripts/set-workspace-version.py "${{ needs.version.outputs.prerelease }}"
 
       - name: Install Linux build dependencies
         run: |
           set -euo pipefail
+          if ! command -v apt-get >/dev/null 2>&1; then
+            exit 0
+          fi
           if command -v sudo >/dev/null 2>&1; then
             as_root() { sudo "$@"; }
           elif [[ "$(id -u)" -eq 0 ]]; then
             as_root() { "$@"; }
           else
             if command -v pkg-config >/dev/null 2>&1; then
-              echo "apt-get is available but this runner has no sudo/root; assuming build dependencies are preinstalled."
+              echo "Build dependencies are preinstalled."
               exit 0
             fi
             echo "pkg-config is missing and this runner cannot install packages without sudo/root." >&2
@@ -64,15 +74,50 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp codex-rs/target/release/rolodex "dist/rolodex-linux-amd64-${{ steps.version.outputs.prerelease }}"
-          ./scripts/build-rolodex-deb.sh "${{ steps.version.outputs.debian }}" codex-rs/target/release/rolodex dist
-          echo "binary=dist/rolodex-linux-amd64-${{ steps.version.outputs.prerelease }}" >> "$GITHUB_OUTPUT"
-          echo "deb=dist/rolodex_${{ steps.version.outputs.debian }}_amd64.deb" >> "$GITHUB_OUTPUT"
+          cp codex-rs/target/release/rolodex "dist/rolodex-linux-amd64-${{ needs.version.outputs.prerelease }}"
+          ./scripts/build-rolodex-deb.sh "${{ needs.version.outputs.debian }}" codex-rs/target/release/rolodex dist
+          echo "binary=dist/rolodex-linux-amd64-${{ needs.version.outputs.prerelease }}" >> "$GITHUB_OUTPUT"
+          echo "deb=dist/rolodex_${{ needs.version.outputs.debian }}_amd64.deb" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Rolodex prerelease artifacts
+      - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rolodex-prerelease-${{ steps.version.outputs.prerelease }}
+          name: rolodex-linux-amd64-${{ needs.version.outputs.prerelease }}
           path: |
             ${{ steps.names.outputs.binary }}
             ${{ steps.names.outputs.deb }}
+
+  build-macos-arm64:
+    needs: version
+    runs-on: macos-15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Stamp Cargo workspace version for this build
+        working-directory: .
+        run: ./scripts/set-workspace-version.py "${{ needs.version.outputs.prerelease }}"
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cargo build Rolodex
+        run: cargo build --release --target aarch64-apple-darwin --bin rolodex
+
+      - name: Prepare artifact
+        working-directory: .
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp codex-rs/target/aarch64-apple-darwin/release/rolodex "dist/rolodex-macos-arm64-${{ needs.version.outputs.prerelease }}"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rolodex-macos-arm64-${{ needs.version.outputs.prerelease }}
+          path: dist/rolodex-macos-arm64-${{ needs.version.outputs.prerelease }}
