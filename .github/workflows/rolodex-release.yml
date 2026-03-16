@@ -53,11 +53,11 @@ jobs:
           elif [[ "$(id -u)" -eq 0 ]]; then
             as_root() { "$@"; }
           else
-            if command -v pkg-config >/dev/null 2>&1; then
+            if command -v pkg-config >/dev/null 2>&1 && command -v cc >/dev/null 2>&1; then
               echo "Build dependencies are preinstalled."
               exit 0
             fi
-            echo "pkg-config is missing and this runner cannot install packages without sudo/root." >&2
+            echo "Build dependencies missing and this runner cannot install packages without sudo/root." >&2
             exit 1
           fi
           as_root apt-get update -y
