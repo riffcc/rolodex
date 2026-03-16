@@ -17,7 +17,7 @@ import {
   SseResponseBody,
 } from "./responsesProxy";
 
-const codexExecPath = path.join(process.cwd(), "..", "..", "codex-rs", "target", "debug", "codex");
+const codexExecPath = path.join(process.cwd(), "..", "..", "codex-rs", "target", "debug", "rolodex");
 
 describe("Codex", () => {
   it("returns thread events", async () => {

@@ -148,8 +148,8 @@ exceptions = [
     # list
     #{ allow = ["Zlib"], crate = "adler32" },
     # Riff-maintained Palace crates are intentionally AGPL-licensed.
-    { allow = ["AGPL-3.0"], crate = "llm-code-sdk" },
-    { allow = ["AGPL-3.0"], crate = "palace-plane" },
+    { allow = ["AGPL-3.0-or-later"], crate = "llm-code-sdk" },
+    { allow = ["AGPL-3.0-or-later"], crate = "palace-plane" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,
@@ -276,6 +276,7 @@ allow-git = []
 # github.com organizations to allow git sources for
 github = [
     "nornagon", # ratatui and crossterm forks
+    "riffcc",   # palace and llm-code-sdk
 ]
 # gitlab.com organizations to allow git sources for
 gitlab = []

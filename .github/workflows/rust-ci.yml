@@ -534,11 +534,16 @@ jobs:
         run: |
           # Required for bubblewrap to work on Linux CI runners.
           as_root() { if command -v sudo >/dev/null 2>&1; then sudo "$@"; else "$@"; fi; }
-          as_root sysctl -w kernel.unprivileged_userns_clone=1
-          # Linux runners can additionally gate unprivileged user namespaces
-          # behind AppArmor.
-          if as_root sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
-            as_root sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          SYSCTL="$(command -v sysctl || echo /usr/sbin/sysctl)"
+          if [ -x "$SYSCTL" ]; then
+            as_root "$SYSCTL" -w kernel.unprivileged_userns_clone=1 || true
+            # Linux runners can additionally gate unprivileged user namespaces
+            # behind AppArmor.
+            if as_root "$SYSCTL" -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+              as_root "$SYSCTL" -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+            fi
+          else
+            echo "sysctl not found; skipping user namespace configuration (may already be enabled)"
           fi
 
       - name: tests

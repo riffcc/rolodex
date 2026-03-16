@@ -60,7 +60,7 @@ jobs:
             exit 1
           fi
           as_root apt-get update -y
-          packages=(pkg-config libcap-dev libasound2-dev libudev-dev dpkg-dev)
+          packages=(build-essential pkg-config libcap-dev libasound2-dev libudev-dev dpkg-dev)
           as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
 
       - uses: dtolnay/rust-toolchain@1.93.0

@@ -14,7 +14,7 @@ import {
   startResponsesTestProxy,
 } from "./responsesProxy";
 
-const codexExecPath = path.join(process.cwd(), "..", "..", "codex-rs", "target", "debug", "codex");
+const codexExecPath = path.join(process.cwd(), "..", "..", "codex-rs", "target", "debug", "rolodex");
 
 function* infiniteShellCall(): Generator<SseResponseBody> {
   while (true) {
