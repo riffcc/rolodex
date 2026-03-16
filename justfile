@@ -51,7 +51,7 @@ test:
 # to ensure that Bazel runs the command in the current working directory.
 [no-cd]
 bazel-codex *args:
-    bazel run //codex-rs/cli:codex --run_under="cd $PWD &&" -- "$@"
+    bazel run //codex-rs/cli:rolodex --run_under="cd $PWD &&" -- "$@"
 
 [no-cd]
 bazel-lock-update:

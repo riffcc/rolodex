@@ -143,7 +143,7 @@ jobs:
             exit 1
           fi
           as_root apt-get update -y
-          packages=(pkg-config libcap-dev libasound2-dev libudev-dev)
+          packages=(build-essential pkg-config libcap-dev libasound2-dev libudev-dev)
           if [[ "${{ matrix.target }}" == 'x86_64-unknown-linux-musl' || "${{ matrix.target }}" == 'aarch64-unknown-linux-musl' ]]; then
             packages+=(libubsan1)
           fi
@@ -455,7 +455,7 @@ jobs:
             exit 1
           fi
           as_root apt-get update -y
-          as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libasound2-dev libudev-dev
+          as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev libudev-dev
       # Some integration tests rely on DotSlash being installed.
       # See https://github.com/openai/codex/pull/7617.
       - name: Install DotSlash
