@@ -962,7 +962,7 @@
         "mode": "tokens",
         "limit": 10000
       },
-      "supports_parallel_tool_calls": true,
+      "supports_parallel_tool_calls": false,
       "context_window": 196608,
       "default_reasoning_summary": "auto",
       "slug": "MiniMax-M2.5-highspeed",
