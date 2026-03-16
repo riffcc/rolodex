@@ -19,9 +19,9 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 Codex is an excellent foundation, but it's built around a single provider (OpenAI) and a single interaction model (text-in, text-out). Rolodex takes the Codex core and pushes it in directions that matter for real-world, multi-provider agent work:
 
 - **Voice-first interaction.** Rolodex integrates the [Handy.computer](https://handy.computer) voice-to-text engine, making it possible to drive your coding agent by speaking naturally instead of typing. This isn't a wrapper around a generic STT API -- it's purpose-built for developer workflows where you're dictating code intent, describing bugs, or narrating architectural decisions while your hands are busy.
-- **Provider-agnostic by default.** Where Codex assumes OpenAI, Rolodex is built to work across providers out of the box -- Anthropic Claude, local models via Ollama and LM Studio, and any OpenAI-compatible endpoint. The model routing and chat compatibility layers are first-class, not bolted on.
+- **Broader model compatibility.** Codex already supports multiple providers out of the box. Rolodex extends that work with compatibility shims for models that don't fully implement the OpenAI API (such as some Chinese-market models), so more endpoints just work without manual configuration.
 - **Opinionated packaging.** Rolodex ships as a single binary (`rolodex`) with `.deb` packages for Debian/Ubuntu, prerelease builds on every push to main, and stable releases cut from tags. No npm required if you don't want it.
-- **Community-driven.** Codex development is driven by OpenAI's priorities. Rolodex development is driven by what working developers actually need -- and we accept contributions from everyone.
+- **Community-driven.** Rolodex is an open fork that welcomes contributions from everyone. We build on the excellent work OpenAI does upstream and add what our users need.
 
 ### Acknowledgements
 
