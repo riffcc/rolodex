@@ -165,7 +165,7 @@ fn translate_input_to_chat_messages(
     for item in input {
         let translated = match item {
             ResponseItem::Message { role, content, .. } => Some(json!({
-                "role": role,
+                "role": translate_message_role(role),
                 "content": translate_content_items_to_chat_content(content),
             })),
             ResponseItem::FunctionCall {
@@ -229,6 +229,14 @@ fn translate_input_to_chat_messages(
     }
 
     Ok(messages)
+}
+
+fn translate_message_role(role: &str) -> &str {
+    match role {
+        "developer" => "system",
+        "system" | "user" | "assistant" | "tool" => role,
+        _ => "user",
+    }
 }
 
 fn translate_content_items_to_chat_content(content: &[ContentItem]) -> Value {
@@ -408,6 +416,8 @@ fn translate_text_controls_to_response_format(text: Option<&TextControls>) -> Op
 mod tests {
     use super::translate_responses_request_to_chat_body;
     use crate::common::ResponsesApiRequest;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
@@ -485,5 +495,38 @@ mod tests {
         assert_eq!(body.get("tools"), None);
         assert_eq!(body.get("tool_choice"), None);
         assert_eq!(body.get("parallel_tool_calls"), None);
+    }
+
+    #[test]
+    fn chat_compatibility_maps_developer_messages_to_system_role() {
+        let request = ResponsesApiRequest {
+            model: "chat-model".to_string(),
+            instructions: String::new(),
+            input: vec![ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "Stay terse.".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            }],
+            tools: Vec::new(),
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: false,
+            reasoning: None,
+            store: false,
+            stream: true,
+            include: Vec::new(),
+            service_tier: None,
+            prompt_cache_key: None,
+            text: None,
+        };
+
+        let body = translate_responses_request_to_chat_body(request).expect("request translates");
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], json!("system"));
+        assert_eq!(messages[0]["content"], json!("Stay terse."));
     }
 }
