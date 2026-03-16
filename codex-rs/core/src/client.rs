@@ -34,6 +34,7 @@ use crate::api_bridge::CoreAuthProvider;
 use crate::api_bridge::auth_provider_from_auth;
 use crate::api_bridge::map_api_error;
 use crate::auth::UnauthorizedRecovery;
+use codex_api::ChatCompletionsClient as ApiChatCompletionsClient;
 use codex_api::CompactClient as ApiCompactClient;
 use codex_api::CompactionInput as ApiCompactionInput;
 use codex_api::MemoriesClient as ApiMemoriesClient;
@@ -383,7 +384,8 @@ impl ModelClient {
     /// If websockets are only enabled via model preference (no explicit feature flag), prefer the
     /// current v2 behavior.
     pub fn responses_websocket_enabled(&self, model_info: &ModelInfo) -> bool {
-        if !self.state.provider.supports_websockets
+        if self.state.provider.wire_api != WireApi::Responses
+            || !self.state.provider.supports_websockets
             || self.state.disable_websockets.load(Ordering::Relaxed)
         {
             return false;
@@ -832,6 +834,63 @@ impl ModelClientSession {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    /// Streams a turn via the provider's Chat Completions API while translating to and from
+    /// Responses-compatible request and event shapes locally.
+    async fn stream_chat_completions_api(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<ServiceTier>,
+        turn_metadata_header: Option<&str>,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.auth_manager.clone();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(super::auth::AuthManager::unauthorized_recovery);
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let (request_telemetry, sse_telemetry) =
+                Self::build_streaming_telemetry(session_telemetry);
+            let compression = self.responses_request_compression(client_setup.auth.as_ref());
+            let options = self.build_responses_options(turn_metadata_header, compression);
+            let request = self.build_responses_request_for_wire_api(
+                WireApi::Chat,
+                &client_setup.api_provider,
+                prompt,
+                model_info,
+                effort,
+                summary,
+                service_tier,
+            )?;
+            let client = ApiChatCompletionsClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+            )
+            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let stream_result = client.stream_request(request, options).await;
+
+            match stream_result {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(stream, session_telemetry.clone());
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    handle_unauthorized(unauthorized_transport, &mut auth_recovery).await?;
+                    continue;
+                }
+                Err(err) => return Err(map_api_error(err)),
+            }
+        }
+    }
+
     /// Streams a turn via the Responses API over WebSocket transport.
     #[allow(clippy::too_many_arguments)]
     async fn stream_responses_websocket(
@@ -1007,7 +1066,7 @@ impl ModelClientSession {
     ) -> Result<ResponseStream> {
         let wire_api = self.client.state.provider.wire_api;
         match wire_api {
-            WireApi::Responses | WireApi::Chat => {
+            WireApi::Responses => {
                 if self.client.responses_websocket_enabled(model_info) {
                     match self
                         .stream_responses_websocket(
@@ -1030,6 +1089,18 @@ impl ModelClientSession {
                 }
 
                 self.stream_responses_api(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    effort,
+                    summary,
+                    service_tier,
+                    turn_metadata_header,
+                )
+                .await
+            }
+            WireApi::Chat => {
+                self.stream_chat_completions_api(
                     prompt,
                     model_info,
                     session_telemetry,

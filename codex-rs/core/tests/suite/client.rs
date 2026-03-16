@@ -1952,15 +1952,23 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chat_wire_api_translates_requests_to_responses_transport() {
+async fn chat_wire_api_bridges_responses_requests_to_chat_completions() {
     skip_if_no_network!();
 
     let server = MockServer::start().await;
-    let resp_mock = mount_sse_once(
-        &server,
-        sse(vec![ev_response_created("resp_1"), ev_completed("resp_1")]),
-    )
-    .await;
+    let sse_body = concat!(
+        "data: {\"id\":\"chatcmpl-1\",\"model\":\"chat-compat\",\"choices\":[{\"delta\":{\"content\":\"Hello from chat compatibility mode\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(sse_body, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
 
     let provider = ModelProviderInfo {
         name: "OpenAI chat compatibility".into(),
@@ -2049,12 +2057,17 @@ async fn chat_wire_api_translates_requests_to_responses_transport() {
         }
     }
 
-    let request = resp_mock.single_request();
-    assert_eq!(request.path(), "/v1/responses");
-    assert_eq!(
-        request.message_input_texts("user"),
-        vec!["Hello from chat compatibility mode".to_string()]
-    );
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.url.path(), "/v1/chat/completions");
+    let body: serde_json::Value = serde_json::from_slice(&request.body).expect("valid JSON body");
+    let messages = body["messages"].as_array().expect("messages array");
+    assert!(messages.iter().any(|message| {
+        message["role"] == "user"
+            && message["content"]
+                == serde_json::Value::String("Hello from chat compatibility mode".to_string())
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

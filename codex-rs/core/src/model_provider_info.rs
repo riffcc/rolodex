@@ -37,14 +37,14 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
-    /// Legacy compatibility mode that translates local request construction into Responses
-    /// format and still uses the Responses transport.
+    /// Compatibility mode that translates Codex Responses-shaped requests to the provider's Chat
+    /// Completions API locally.
     Chat,
 }
 
 impl WireApi {
     pub const fn uses_responses_transport(self) -> bool {
-        matches!(self, Self::Responses | Self::Chat)
+        matches!(self, Self::Responses)
     }
 
     pub const fn translates_requests_locally(self) -> bool {
@@ -452,7 +452,7 @@ wire_api = "chat"
 
         let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
         assert_eq!(provider.wire_api, WireApi::Chat);
-        assert!(provider.wire_api.uses_responses_transport());
+        assert!(!provider.wire_api.uses_responses_transport());
         assert!(provider.wire_api.translates_requests_locally());
     }
 }
