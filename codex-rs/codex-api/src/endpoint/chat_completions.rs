@@ -23,6 +23,7 @@ use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use tracing::warn;
 
 pub struct ChatCompletionsClient<T: HttpTransport, A: AuthProvider> {
     session: EndpointSession<T, A>,
@@ -129,7 +130,10 @@ fn translate_responses_request_to_chat_body(
         .tools
         .into_iter()
         .map(translate_tool_to_chat_tool)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
         body["tool_choice"] = Value::String(request.tool_choice);
@@ -275,7 +279,7 @@ fn chat_tool_call_message(name: &str, arguments: String, call_id: String) -> Val
     })
 }
 
-fn translate_tool_to_chat_tool(tool: Value) -> Result<Value, ApiError> {
+fn translate_tool_to_chat_tool(tool: Value) -> Result<Option<Value>, ApiError> {
     let Some(kind) = tool.get("type").and_then(Value::as_str) else {
         return Err(ApiError::InvalidRequest {
             message: "chat compatibility could not translate a tool without a type".to_string(),
@@ -283,7 +287,7 @@ fn translate_tool_to_chat_tool(tool: Value) -> Result<Value, ApiError> {
     };
 
     match kind {
-        "function" => Ok(json!({
+        "function" => Ok(Some(json!({
             "type": "function",
             "function": {
                 "name": tool.get("name").cloned().unwrap_or(Value::Null),
@@ -291,7 +295,7 @@ fn translate_tool_to_chat_tool(tool: Value) -> Result<Value, ApiError> {
                 "parameters": tool.get("parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {}, "additionalProperties": false })),
                 "strict": tool.get("strict").cloned().unwrap_or(Value::Bool(false)),
             }
-        })),
+        }))),
         "custom" => {
             let name = tool.get("name").and_then(Value::as_str).ok_or_else(|| {
                 ApiError::InvalidRequest {
@@ -325,7 +329,7 @@ fn translate_tool_to_chat_tool(tool: Value) -> Result<Value, ApiError> {
                     translated_description.push_str(&format!("\nDefinition: {definition}"));
                 }
             }
-            Ok(json!({
+            Ok(Some(json!({
                 "type": "function",
                 "function": {
                     "name": name,
@@ -343,9 +347,9 @@ fn translate_tool_to_chat_tool(tool: Value) -> Result<Value, ApiError> {
                     },
                     "strict": false,
                 }
-            }))
+            })))
         }
-        "local_shell" => Ok(json!({
+        "local_shell" => Ok(Some(json!({
             "type": "function",
             "function": {
                 "name": "local_shell",
@@ -372,7 +376,14 @@ fn translate_tool_to_chat_tool(tool: Value) -> Result<Value, ApiError> {
                 },
                 "strict": false,
             }
-        })),
+        }))),
+        "web_search" | "image_generation" => {
+            warn!(
+                tool_type = kind,
+                "dropping Responses-native tool from chat compatibility request"
+            );
+            Ok(None)
+        }
         unsupported => Err(ApiError::InvalidRequest {
             message: format!(
                 "wire_api=\"chat\" cannot translate Responses tool type `{unsupported}` yet"
@@ -391,4 +402,88 @@ fn translate_text_controls_to_response_format(text: Option<&TextControls>) -> Op
             "strict": format.strict,
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::translate_responses_request_to_chat_body;
+    use crate::common::ResponsesApiRequest;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    #[test]
+    fn chat_compatibility_drops_responses_native_tools() {
+        let request = ResponsesApiRequest {
+            model: "chat-model".to_string(),
+            instructions: "system".to_string(),
+            input: Vec::new(),
+            tools: vec![
+                json!({
+                    "type": "web_search",
+                    "external_web_access": true
+                }),
+                json!({
+                    "type": "image_generation",
+                    "output_format": "png"
+                }),
+                json!({
+                    "type": "function",
+                    "name": "echo",
+                    "description": "Echoes back text.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "value": { "type": "string" }
+                        },
+                        "required": ["value"],
+                        "additionalProperties": false
+                    },
+                    "strict": true
+                }),
+            ],
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: true,
+            reasoning: None,
+            store: false,
+            stream: true,
+            include: Vec::new(),
+            service_tier: None,
+            prompt_cache_key: None,
+            text: None,
+        };
+
+        let body = translate_responses_request_to_chat_body(request).expect("request translates");
+        let tools = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], json!("echo"));
+        assert_eq!(body["tool_choice"], json!("auto"));
+        assert_eq!(body["parallel_tool_calls"], json!(true));
+    }
+
+    #[test]
+    fn chat_compatibility_omits_tool_controls_when_no_tools_survive() {
+        let request = ResponsesApiRequest {
+            model: "chat-model".to_string(),
+            instructions: String::new(),
+            input: Vec::new(),
+            tools: vec![json!({
+                "type": "web_search",
+                "external_web_access": false
+            })],
+            tool_choice: "required".to_string(),
+            parallel_tool_calls: true,
+            reasoning: None,
+            store: false,
+            stream: true,
+            include: Vec::new(),
+            service_tier: None,
+            prompt_cache_key: None,
+            text: None,
+        };
+
+        let body = translate_responses_request_to_chat_body(request).expect("request translates");
+        assert_eq!(body.get("tools"), None);
+        assert_eq!(body.get("tool_choice"), None);
+        assert_eq!(body.get("parallel_tool_calls"), None);
+    }
 }

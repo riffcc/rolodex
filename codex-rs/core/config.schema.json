@@ -1694,7 +1694,7 @@
           "type": "string"
         },
         {
-          "description": "Legacy compatibility mode that translates local request construction into Responses format and still uses the Responses transport.",
+          "description": "Compatibility mode that translates Codex Responses-shaped requests to the provider's Chat Completions API locally.",
           "enum": [
             "chat"
           ],
