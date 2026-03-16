@@ -316,15 +316,15 @@ fn translate_content_items_to_chat_content(content: &[ContentItem]) -> Value {
     Value::Array(
         content
             .iter()
-            .filter_map(|item| match item {
-                ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(json!({
+            .map(|item| match item {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => json!({
                     "type": "text",
                     "text": text,
-                })),
-                ContentItem::InputImage { image_url } => Some(json!({
+                }),
+                ContentItem::InputImage { image_url } => json!({
                     "type": "image_url",
                     "image_url": { "url": image_url },
-                })),
+                }),
             })
             .collect(),
     )
