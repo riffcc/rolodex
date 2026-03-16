@@ -139,9 +139,6 @@ fn translate_responses_request_to_chat_body(
         body["tool_choice"] = Value::String(request.tool_choice);
         body["parallel_tool_calls"] = Value::Bool(request.parallel_tool_calls);
     }
-    if let Some(service_tier) = request.service_tier {
-        body["service_tier"] = Value::String(service_tier);
-    }
     if let Some(response_format) = translate_text_controls_to_response_format(request.text.as_ref())
     {
         body["response_format"] = response_format;
@@ -155,39 +152,33 @@ fn translate_input_to_chat_messages(
     input: &[ResponseItem],
 ) -> Result<Vec<Value>, ApiError> {
     let mut messages = Vec::new();
+    let mut system_segments = Vec::new();
     if !instructions.trim().is_empty() {
-        messages.push(json!({
-            "role": "system",
-            "content": instructions,
-        }));
+        system_segments.push(instructions.to_string());
     }
 
-    for item in input {
-        let translated = match item {
-            ResponseItem::Message { role, content, .. } => Some(json!({
-                "role": translate_message_role(role),
-                "content": translate_content_items_to_chat_content(content),
-            })),
+    let translate_tool_call = |item: &ResponseItem| -> Result<Option<Value>, ApiError> {
+        match item {
             ResponseItem::FunctionCall {
                 name,
                 arguments,
                 call_id,
                 ..
-            } => Some(chat_tool_call_message(
+            } => Ok(Some(chat_tool_call(
                 name,
                 arguments.clone(),
                 call_id.clone(),
-            )),
+            ))),
             ResponseItem::CustomToolCall {
                 name,
                 input,
                 call_id,
                 ..
-            } => Some(chat_tool_call_message(
+            } => Ok(Some(chat_tool_call(
                 name,
                 json!({ "input": input }).to_string(),
                 call_id.clone(),
-            )),
+            ))),
             ResponseItem::LocalShellCall {
                 call_id,
                 id,
@@ -200,7 +191,7 @@ fn translate_input_to_chat_messages(
                             .to_string(),
                     }
                 })?;
-                Some(chat_tool_call_message(
+                Ok(Some(chat_tool_call(
                     "local_shell",
                     serde_json::to_string(action).map_err(|err| ApiError::InvalidRequest {
                         message: format!(
@@ -208,8 +199,63 @@ fn translate_input_to_chat_messages(
                         ),
                     })?,
                     call_id,
-                ))
+                )))
             }
+            ResponseItem::Message { .. }
+            | ResponseItem::FunctionCallOutput { .. }
+            | ResponseItem::CustomToolCallOutput { .. }
+            | ResponseItem::Reasoning { .. }
+            | ResponseItem::WebSearchCall { .. }
+            | ResponseItem::ImageGenerationCall { .. }
+            | ResponseItem::GhostSnapshot { .. }
+            | ResponseItem::Compaction { .. }
+            | ResponseItem::Other => Ok(None),
+        }
+    };
+
+    let mut index = 0;
+    while index < input.len() {
+        if let Some(tool_call) = translate_tool_call(&input[index])? {
+            let mut tool_calls = vec![tool_call];
+            index += 1;
+            while index < input.len() {
+                let Some(tool_call) = translate_tool_call(&input[index])? else {
+                    break;
+                };
+                tool_calls.push(tool_call);
+                index += 1;
+            }
+            messages.push(json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": tool_calls,
+            }));
+            continue;
+        }
+
+        let translated = match &input[index] {
+            ResponseItem::Message { role, content, .. } => {
+                let role = translate_message_role(role);
+                let content = translate_content_items_to_chat_content(content);
+                if role == "system" {
+                    let system_content = match content {
+                        Value::String(text) => text,
+                        other => other.to_string(),
+                    };
+                    if !system_content.is_empty() {
+                        system_segments.push(system_content);
+                    }
+                    None
+                } else {
+                    Some(json!({
+                        "role": role,
+                        "content": content,
+                    }))
+                }
+            }
+            ResponseItem::FunctionCall { .. }
+            | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::LocalShellCall { .. } => None,
             ResponseItem::FunctionCallOutput { call_id, output }
             | ResponseItem::CustomToolCallOutput { call_id, output } => Some(json!({
                 "role": "tool",
@@ -226,6 +272,17 @@ fn translate_input_to_chat_messages(
         if let Some(message) = translated {
             messages.push(message);
         }
+        index += 1;
+    }
+
+    if !system_segments.is_empty() {
+        messages.insert(
+            0,
+            json!({
+                "role": "system",
+                "content": system_segments.join("\n\n"),
+            }),
+        );
     }
 
     Ok(messages)
@@ -273,17 +330,14 @@ fn translate_content_items_to_chat_content(content: &[ContentItem]) -> Value {
     )
 }
 
-fn chat_tool_call_message(name: &str, arguments: String, call_id: String) -> Value {
+fn chat_tool_call(name: &str, arguments: String, call_id: String) -> Value {
     json!({
-        "role": "assistant",
-        "tool_calls": [{
-            "id": call_id,
-            "type": "function",
-            "function": {
-                "name": name,
-                "arguments": arguments,
-            }
-        }]
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        }
     })
 }
 
@@ -417,6 +471,7 @@ mod tests {
     use super::translate_responses_request_to_chat_body;
     use crate::common::ResponsesApiRequest;
     use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::models::ResponseItem;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -528,5 +583,181 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], json!("system"));
         assert_eq!(messages[0]["content"], json!("Stay terse."));
+    }
+
+    #[test]
+    fn chat_compatibility_merges_all_system_messages() {
+        let request = ResponsesApiRequest {
+            model: "chat-model".to_string(),
+            instructions: "Base instructions.".to_string(),
+            input: vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "Stay terse.".to_string(),
+                    }],
+                    end_turn: None,
+                    phase: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "system".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "Follow repo rules.".to_string(),
+                    }],
+                    end_turn: None,
+                    phase: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "hello".to_string(),
+                    }],
+                    end_turn: None,
+                    phase: None,
+                },
+            ],
+            tools: Vec::new(),
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: false,
+            reasoning: None,
+            store: false,
+            stream: true,
+            include: Vec::new(),
+            service_tier: None,
+            prompt_cache_key: None,
+            text: None,
+        };
+
+        let body = translate_responses_request_to_chat_body(request).expect("request translates");
+        assert_eq!(
+            body["messages"],
+            json!([
+                {
+                    "role": "system",
+                    "content": "Base instructions.\n\nStay terse.\n\nFollow repo rules."
+                },
+                {
+                    "role": "user",
+                    "content": "hello"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_compatibility_omits_service_tier() {
+        let request = ResponsesApiRequest {
+            model: "chat-model".to_string(),
+            instructions: String::new(),
+            input: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: false,
+            reasoning: None,
+            store: false,
+            stream: true,
+            include: Vec::new(),
+            service_tier: Some("priority".to_string()),
+            prompt_cache_key: None,
+            text: None,
+        };
+
+        let body = translate_responses_request_to_chat_body(request).expect("request translates");
+        assert_eq!(body.get("service_tier"), None);
+    }
+
+    #[test]
+    fn chat_compatibility_groups_consecutive_tool_calls_before_outputs() {
+        let request = ResponsesApiRequest {
+            model: "chat-model".to_string(),
+            instructions: String::new(),
+            input: vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "commit these changes".to_string(),
+                    }],
+                    end_turn: None,
+                    phase: None,
+                },
+                ResponseItem::FunctionCall {
+                    id: None,
+                    name: "list_dir".to_string(),
+                    arguments: "{\"dir_path\":\"/repo\"}".to_string(),
+                    call_id: "call_1".to_string(),
+                },
+                ResponseItem::FunctionCall {
+                    id: None,
+                    name: "exec_command".to_string(),
+                    arguments: "{\"cmd\":\"git status --short\"}".to_string(),
+                    call_id: "call_2".to_string(),
+                },
+                ResponseItem::FunctionCallOutput {
+                    call_id: "call_1".to_string(),
+                    output: FunctionCallOutputPayload::from_text("SKILL.md".to_string()),
+                },
+                ResponseItem::FunctionCallOutput {
+                    call_id: "call_2".to_string(),
+                    output: FunctionCallOutputPayload::from_text("M foo.rs".to_string()),
+                },
+            ],
+            tools: Vec::new(),
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: true,
+            reasoning: None,
+            store: false,
+            stream: true,
+            include: Vec::new(),
+            service_tier: None,
+            prompt_cache_key: None,
+            text: None,
+        };
+
+        let body = translate_responses_request_to_chat_body(request).expect("request translates");
+        assert_eq!(
+            body["messages"],
+            json!([
+                {
+                    "role": "user",
+                    "content": "commit these changes"
+                },
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "list_dir",
+                                "arguments": "{\"dir_path\":\"/repo\"}"
+                            }
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"git status --short\"}"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "SKILL.md"
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_2",
+                    "content": "M foo.rs"
+                }
+            ])
+        );
     }
 }
