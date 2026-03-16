@@ -36,6 +36,7 @@ struct ChatStreamState {
     token_usage: Option<TokenUsage>,
     saw_created: bool,
     saw_server_model: Option<String>,
+    saw_terminal_finish_reason: bool,
 }
 
 #[derive(Debug, Default)]
@@ -170,8 +171,14 @@ async fn process_chat_sse(
                 return;
             }
             Ok(None) => {
-                let error = ApiError::Stream("stream closed before completion".to_string());
-                let _ = tx_event.send(Err(error)).await;
+                if state.saw_terminal_finish_reason {
+                    if let Err(err) = flush_and_complete(&mut state, &tx_event).await {
+                        let _ = tx_event.send(Err(err)).await;
+                    }
+                } else {
+                    let error = ApiError::Stream("stream closed before completion".to_string());
+                    let _ = tx_event.send(Err(error)).await;
+                }
                 return;
             }
             Err(_) => {
@@ -329,9 +336,11 @@ async fn flush_for_finish_reason(
         "tool_calls" => {
             flush_assistant_message(state, tx_event).await?;
             flush_tool_calls(state, tx_event).await?;
+            state.saw_terminal_finish_reason = true;
         }
         "stop" | "length" | "content_filter" => {
             flush_assistant_message(state, tx_event).await?;
+            state.saw_terminal_finish_reason = true;
         }
         _ => {}
     }
@@ -557,6 +566,44 @@ mod tests {
                     total_tokens: 12,
                 }),
             } if response_id == "chatcmpl-2"
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_completion_stream_without_done_after_stop_completes() {
+        let chunks = [
+            br#"data: {"id":"chatcmpl-3","choices":[{"delta":{"content":"Hello"},"finish_reason":"stop"}]}
+
+"# as &[u8],
+        ];
+
+        let events = collect_events(&chunks).await;
+        assert_eq!(events.len(), 6);
+        assert!(matches!(events[0], ResponseEvent::RateLimits(_)));
+        assert!(matches!(events[1], ResponseEvent::Created));
+        assert!(matches!(
+            &events[2],
+            ResponseEvent::OutputItemAdded(ResponseItem::Message { role, .. }) if role == "assistant"
+        ));
+        assert!(matches!(
+            &events[3],
+            ResponseEvent::OutputTextDelta(delta) if delta == "Hello"
+        ));
+        assert!(matches!(
+            &events[4],
+            ResponseEvent::OutputItemDone(ResponseItem::Message { role, content, .. })
+                if role == "assistant"
+                    && content
+                        == &vec![ContentItem::OutputText {
+                            text: "Hello".to_string(),
+                        }]
+        ));
+        assert!(matches!(
+            &events[5],
+            ResponseEvent::Completed {
+                response_id,
+                token_usage
+            } if response_id == "chatcmpl-3" && token_usage.is_none()
         ));
     }
 }
