@@ -1,0 +1,7 @@
+---
+source: tui/src/markdown.rs
+assertion_line: 169
+expression: "lines.join(\"\\n\")"
+---
+The user has simply said hello.
+Hey! How can I help you today?

@@ -1,3 +1,4 @@
+use ratatui::style::Modifier;
 use ratatui::text::Line;
 use std::path::Path;
 
@@ -11,18 +12,53 @@ pub(crate) fn append_markdown(
     cwd: Option<&Path>,
     lines: &mut Vec<Line<'static>>,
 ) {
-    let rendered = crate::markdown_render::render_markdown_text_with_width_and_cwd(
-        markdown_source,
-        width,
-        cwd,
-    );
-    crate::render::line_utils::push_owned_lines(&rendered.lines, lines);
+    let mut segments: Vec<(String, bool)> = Vec::new();
+    let mut in_think = false;
+
+    for raw_line in markdown_source.split_inclusive('\n') {
+        let line_without_newline = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let trimmed = line_without_newline
+            .strip_suffix('\r')
+            .unwrap_or(line_without_newline);
+        if trimmed.trim() == "<think>" {
+            in_think = true;
+            continue;
+        }
+        if trimmed.trim() == "</think>" {
+            in_think = false;
+            continue;
+        }
+
+        if let Some((existing, italic)) = segments.last_mut()
+            && *italic == in_think
+        {
+            existing.push_str(raw_line);
+        } else {
+            segments.push((raw_line.to_string(), in_think));
+        }
+    }
+
+    for (segment, italic) in segments {
+        let mut rendered =
+            crate::markdown_render::render_markdown_text_with_width_and_cwd(&segment, width, cwd);
+        if italic {
+            rendered.lines.iter_mut().for_each(|line| {
+                line.style = line.style.add_modifier(Modifier::ITALIC);
+                line.spans.iter_mut().for_each(|span| {
+                    span.style = span.style.add_modifier(Modifier::ITALIC);
+                });
+            });
+        }
+        crate::render::line_utils::push_owned_lines(&rendered.lines, lines);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
+    use ratatui::style::Modifier;
     use ratatui::text::Line;
 
     fn lines_to_strings(lines: &[Line<'static>]) -> Vec<String> {
@@ -112,5 +148,24 @@ mod tests {
                 .any(|w| w[0].trim_end() == "1." && w[1] == "Tight item"),
             "did not expect a split into ['1.', 'Tight item']; got: {lines:?}"
         );
+    }
+
+    #[test]
+    fn append_markdown_renders_think_blocks_in_italics() {
+        let src = "<think>\nThe user has simply said hello.\n</think>\n\nHey! How can I help you today?\n";
+        let mut out = Vec::new();
+        append_markdown(src, None, None, &mut out);
+
+        let lines = lines_to_strings(&out);
+        assert_eq!(
+            lines,
+            vec![
+                "The user has simply said hello.".to_string(),
+                "Hey! How can I help you today?".to_string()
+            ]
+        );
+        assert!(out[0].style.add_modifier.contains(Modifier::ITALIC));
+        assert!(!out[1].style.add_modifier.contains(Modifier::ITALIC));
+        assert_snapshot!(lines.join("\n"));
     }
 }
