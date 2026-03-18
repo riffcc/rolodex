@@ -559,6 +559,7 @@ impl ModelClientSession {
         Ok(request)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_responses_request_for_wire_api(
         &self,
         wire_api: WireApi,

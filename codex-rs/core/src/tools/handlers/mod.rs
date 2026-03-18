@@ -3,6 +3,7 @@ pub mod apply_patch;
 mod artifacts;
 mod code_mode;
 mod dynamic;
+#[allow(dead_code)]
 mod edit;
 mod grep_files;
 mod js_repl;
