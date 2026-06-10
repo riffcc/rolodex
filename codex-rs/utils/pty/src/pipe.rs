@@ -3,9 +3,9 @@ use std::io;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::Result;
 use tokio::io::AsyncRead;
@@ -64,11 +64,7 @@ fn kill_process(pid: u32) -> io::Result<()> {
         let success = winapi::um::processthreadsapi::TerminateProcess(handle, 1);
         let err = io::Error::last_os_error();
         winapi::um::handleapi::CloseHandle(handle);
-        if success == 0 {
-            Err(err)
-        } else {
-            Ok(())
-        }
+        if success == 0 { Err(err) } else { Ok(()) }
     }
 }
 
@@ -102,10 +98,14 @@ async fn spawn_process_with_stdin_mode(
     env: &HashMap<String, String>,
     arg0: &Option<String>,
     stdin_mode: PipeStdinMode,
+    inherited_fds: &[i32],
 ) -> Result<SpawnedProcess> {
     if program.is_empty() {
         anyhow::bail!("missing program for pipe spawn");
     }
+
+    #[cfg(not(unix))]
+    let _ = inherited_fds;
 
     let mut command = Command::new(program);
     #[cfg(unix)]
@@ -115,11 +115,14 @@ async fn spawn_process_with_stdin_mode(
     #[cfg(target_os = "linux")]
     let parent_pid = unsafe { libc::getpid() };
     #[cfg(unix)]
+    let inherited_fds = inherited_fds.to_vec();
+    #[cfg(unix)]
     unsafe {
         command.pre_exec(move || {
             crate::process_group::detach_from_tty()?;
             #[cfg(target_os = "linux")]
             crate::process_group::set_parent_death_signal(parent_pid)?;
+            crate::pty::close_inherited_fds_except(&inherited_fds);
             Ok(())
         });
     }
@@ -159,12 +162,11 @@ async fn spawn_process_with_stdin_mode(
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>(128);
     let (stderr_tx, stderr_rx) = mpsc::channel::<Vec<u8>>(128);
     let writer_handle = if let Some(stdin) = stdin {
-        let writer = Arc::new(tokio::sync::Mutex::new(stdin));
         tokio::spawn(async move {
+            let mut writer = stdin;
             while let Some(bytes) = writer_rx.recv().await {
-                let mut guard = writer.lock().await;
-                let _ = guard.write_all(&bytes).await;
-                let _ = guard.flush().await;
+                let _ = writer.write_all(&bytes).await;
+                let _ = writer.flush().await;
             }
         })
     } else {
@@ -231,7 +233,8 @@ async fn spawn_process_with_stdin_mode(
         wait_handle,
         exit_status,
         exit_code,
-        None,
+        /*pty_handles*/ None,
+        /*resizer*/ None,
     );
 
     Ok(SpawnedProcess {
@@ -250,7 +253,7 @@ pub async fn spawn_process(
     env: &HashMap<String, String>,
     arg0: &Option<String>,
 ) -> Result<SpawnedProcess> {
-    spawn_process_with_stdin_mode(program, args, cwd, env, arg0, PipeStdinMode::Piped).await
+    spawn_process_with_stdin_mode(program, args, cwd, env, arg0, PipeStdinMode::Piped, &[]).await
 }
 
 /// Spawn a process using regular pipes, but close stdin immediately.
@@ -261,5 +264,27 @@ pub async fn spawn_process_no_stdin(
     env: &HashMap<String, String>,
     arg0: &Option<String>,
 ) -> Result<SpawnedProcess> {
-    spawn_process_with_stdin_mode(program, args, cwd, env, arg0, PipeStdinMode::Null).await
+    spawn_process_no_stdin_with_inherited_fds(program, args, cwd, env, arg0, &[]).await
+}
+
+/// Spawn a process using regular pipes, close stdin immediately, and preserve
+/// selected inherited file descriptors across exec on Unix.
+pub async fn spawn_process_no_stdin_with_inherited_fds(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    arg0: &Option<String>,
+    inherited_fds: &[i32],
+) -> Result<SpawnedProcess> {
+    spawn_process_with_stdin_mode(
+        program,
+        args,
+        cwd,
+        env,
+        arg0,
+        PipeStdinMode::Null,
+        inherited_fds,
+    )
+    .await
 }

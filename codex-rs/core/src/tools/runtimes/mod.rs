@@ -4,53 +4,223 @@ Module: runtimes
 Concrete ToolRuntime implementations for specific tools. Each runtime stays
 small and focused and reuses the orchestrator for approvals + sandbox + retry.
 */
-use crate::exec::ExecExpiration;
+use crate::exec_env::CODEX_THREAD_ID_ENV_VAR;
 use crate::path_utils;
-use crate::sandboxing::CommandSpec;
 use crate::sandboxing::SandboxPermissions;
 use crate::shell::Shell;
-use crate::skills::SkillMetadata;
+use crate::shell::ShellType;
 use crate::tools::sandboxing::ToolError;
-use codex_protocol::models::PermissionProfile;
+#[cfg(unix)]
+use codex_install_context::InstallContext;
+#[cfg(target_os = "macos")]
+use codex_network_proxy::CODEX_PROXY_GIT_SSH_COMMAND_MARKER;
+use codex_network_proxy::CUSTOM_CA_ENV_KEYS;
+use codex_network_proxy::PROXY_ACTIVE_ENV_KEY;
+use codex_network_proxy::PROXY_ENV_KEYS;
+#[cfg(target_os = "macos")]
+use codex_network_proxy::PROXY_GIT_SSH_COMMAND_ENV_KEY;
+use codex_network_proxy::is_managed_mitm_ca_trust_bundle_path;
+use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::AdditionalPermissionProfile;
+use codex_sandboxing::SandboxCommand;
+use codex_sandboxing::SandboxType;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::path::Path;
 
-pub mod apply_patch;
-pub mod shell;
-pub mod unified_exec;
+pub(crate) mod apply_patch;
+pub(crate) mod shell;
+pub(crate) mod unified_exec;
 
-#[derive(Debug, Clone)]
-pub(crate) struct ExecveSessionApproval {
-    /// If this execve session approval is associated with a skill script, this
-    /// field contains metadata about the skill.
-    #[cfg_attr(not(unix), allow(dead_code))]
-    pub skill: Option<SkillMetadata>,
-}
-
-/// Shared helper to construct a CommandSpec from a tokenized command line.
+/// Shared helper to construct sandbox transform inputs from a tokenized command line.
 /// Validates that at least a program is present.
-pub(crate) fn build_command_spec(
+pub(crate) fn build_sandbox_command(
     command: &[String],
-    cwd: &Path,
+    cwd: &AbsolutePathBuf,
     env: &HashMap<String, String>,
-    expiration: ExecExpiration,
-    sandbox_permissions: SandboxPermissions,
-    additional_permissions: Option<PermissionProfile>,
-    justification: Option<String>,
-) -> Result<CommandSpec, ToolError> {
+    additional_permissions: Option<AdditionalPermissionProfile>,
+) -> Result<SandboxCommand, ToolError> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| ToolError::Rejected("command args are empty".to_string()))?;
-    Ok(CommandSpec {
-        program: program.clone(),
+    Ok(SandboxCommand {
+        program: program.clone().into(),
         args: args.to_vec(),
-        cwd: cwd.to_path_buf(),
+        cwd: cwd.clone(),
         env: env.clone(),
-        expiration,
-        sandbox_permissions,
         additional_permissions,
-        justification,
     })
+}
+
+pub(crate) fn exec_env_for_sandbox_permissions(
+    env: &HashMap<String, String>,
+    sandbox_permissions: SandboxPermissions,
+) -> HashMap<String, String> {
+    let mut env = env.clone();
+    if sandbox_permissions.requires_escalated_permissions()
+        && env.contains_key(PROXY_ACTIVE_ENV_KEY)
+    {
+        strip_managed_proxy_env(&mut env);
+    }
+    env
+}
+
+pub(crate) fn strip_managed_proxy_env(env: &mut HashMap<String, String>) {
+    for key in PROXY_ENV_KEYS {
+        env.remove(*key);
+    }
+    for key in CUSTOM_CA_ENV_KEYS {
+        if env
+            .get(key)
+            .is_some_and(|value| is_managed_mitm_ca_trust_bundle_path(value))
+        {
+            env.remove(key);
+        }
+    }
+    // Only macOS injects a Codex-owned SSH wrapper for the managed SOCKS proxy.
+    #[cfg(target_os = "macos")]
+    if env
+        .get(PROXY_GIT_SSH_COMMAND_ENV_KEY)
+        .is_some_and(|command| command.starts_with(CODEX_PROXY_GIT_SSH_COMMAND_MARKER))
+    {
+        env.remove(PROXY_GIT_SSH_COMMAND_ENV_KEY);
+    }
+}
+
+/// Prepends `path_entry` to `PATH`, removing duplicate and empty existing
+/// entries.
+///
+/// Returns the updated `PATH` value when `env` was changed. Returns `None` when
+/// `path_entry` is empty, leaving `env` untouched so an empty entry does not add
+/// the current working directory to command lookup.
+#[cfg(unix)]
+fn prepend_path_entry(env: &mut HashMap<String, String>, path_entry: &str) -> Option<String> {
+    if path_entry.is_empty() {
+        None
+    } else {
+        let updated_path = match env.get("PATH") {
+            Some(path) if !path.is_empty() => std::iter::once(path_entry)
+                .chain(
+                    path.split(':')
+                        .filter(|entry| !entry.is_empty() && *entry != path_entry),
+                )
+                .collect::<Vec<_>>()
+                .join(":"),
+            _ => path_entry.to_string(),
+        };
+        env.insert("PATH".to_string(), updated_path.clone());
+        Some(updated_path)
+    }
+}
+
+/// PATH entries owned by Codex runtime setup.
+///
+/// These are applied to the live exec environment immediately and replayed after
+/// restoring a shell snapshot, unless the user explicitly overrides `PATH`.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct RuntimePathPrepends {
+    entries: Vec<String>,
+}
+
+impl RuntimePathPrepends {
+    #[cfg(unix)]
+    pub(crate) fn prepend(&mut self, env: &mut HashMap<String, String>, path_entry: &Path) {
+        let path_entry = path_entry.to_string_lossy().to_string();
+        if prepend_path_entry(env, &path_entry).is_some() {
+            self.entries.retain(|entry| entry != &path_entry);
+            self.entries.push(path_entry);
+        }
+    }
+
+    fn shell_exports_after_snapshot(
+        &self,
+        explicit_env_overrides: &HashMap<String, String>,
+    ) -> String {
+        if explicit_env_overrides.contains_key("PATH") {
+            return String::new();
+        }
+
+        self.entries
+            .iter()
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                let entry = shell_single_quote(entry);
+                format!(
+                    "if [ -n \"${{PATH:-}}\" ]; then export PATH='{entry}':\"$PATH\"; else export PATH='{entry}'; fi"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn apply_package_path_prepend(
+    env: &mut HashMap<String, String>,
+    runtime_path_prepends: &mut RuntimePathPrepends,
+) {
+    let Some(path_dir) = InstallContext::current()
+        .package_layout
+        .as_ref()
+        .and_then(|package_layout| package_layout.path_dir.as_ref())
+    else {
+        return;
+    };
+
+    runtime_path_prepends.prepend(env, path_dir.as_path());
+}
+
+#[cfg(unix)]
+pub(crate) fn prepend_zsh_fork_bin_to_path(
+    env: &mut HashMap<String, String>,
+    shell_zsh_path: &Path,
+) -> Option<String> {
+    let zsh_bin_dir = shell_zsh_path
+        .parent()
+        .map(|path| path.to_string_lossy().to_string())?;
+    prepend_path_entry(env, &zsh_bin_dir)
+}
+
+#[cfg(unix)]
+pub(crate) fn apply_zsh_fork_path_prepend(
+    env: &mut HashMap<String, String>,
+    runtime_path_prepends: &mut RuntimePathPrepends,
+    shell_zsh_path: &Path,
+) {
+    let Some(zsh_bin_dir) = shell_zsh_path.parent() else {
+        return;
+    };
+    runtime_path_prepends.prepend(env, zsh_bin_dir);
+}
+
+pub(crate) fn disable_powershell_profile_for_elevated_windows_sandbox(
+    command: &[String],
+    shell_type: Option<&ShellType>,
+    sandbox: SandboxType,
+    windows_sandbox_level: WindowsSandboxLevel,
+) -> Vec<String> {
+    if shell_type != Some(&ShellType::PowerShell)
+        || sandbox != SandboxType::WindowsRestrictedToken
+        || windows_sandbox_level != WindowsSandboxLevel::Elevated
+        || command.is_empty()
+    {
+        return command.to_vec();
+    }
+
+    if command[1..]
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case("-NoProfile"))
+    {
+        return command.to_vec();
+    }
+
+    // The elevated Windows sandbox runs as a dedicated sandbox account while
+    // HOME/USERPROFILE may still point at the real user profile. Loading
+    // PowerShell profiles in that mixed context is not a valid login shell.
+    let mut command = command.to_vec();
+    command.insert(1, "-NoProfile".to_string());
+    command
 }
 
 /// POSIX-only helper: for commands produced by `Shell::derive_exec_args`
@@ -65,11 +235,24 @@ pub(crate) fn build_command_spec(
 /// This wrapper script uses POSIX constructs (`if`, `.`, `exec`) so it can
 /// be run by Bash/Zsh/sh. On non-matching commands, or when command cwd does
 /// not match the snapshot cwd, this is a no-op.
+///
+/// `explicit_env_overrides` and `env` are intentionally separate inputs.
+/// `explicit_env_overrides` contains policy-driven shell env overrides that
+/// should win after the snapshot is sourced, while `env` is the full live exec
+/// environment. We need access to both so snapshot restore logic can preserve
+/// runtime-only vars like `CODEX_THREAD_ID` without pretending they came from
+/// the explicit override policy.
+///
+/// `runtime_path_prepends` contains Codex-owned PATH entries already applied to
+/// the live `env`; snapshot wrapping replays them after restoring the snapshot
+/// PATH unless the user explicitly overrides `PATH`.
 pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
     command: &[String],
     session_shell: &Shell,
-    cwd: &Path,
+    cwd: &AbsolutePathBuf,
     explicit_env_overrides: &HashMap<String, String>,
+    env: &HashMap<String, String>,
+    runtime_path_prepends: &RuntimePathPrepends,
 ) -> Vec<String> {
     if cfg!(windows) {
         return command.to_vec();
@@ -83,14 +266,7 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
         return command.to_vec();
     }
 
-    if if let (Ok(snapshot_cwd), Ok(command_cwd)) = (
-        path_utils::normalize_for_path_comparison(snapshot.cwd.as_path()),
-        path_utils::normalize_for_path_comparison(cwd),
-    ) {
-        snapshot_cwd != command_cwd
-    } else {
-        snapshot.cwd != cwd
-    } {
+    if !path_utils::paths_match_after_normalization(snapshot.cwd.as_path(), cwd) {
         return command.to_vec();
     }
 
@@ -112,7 +288,20 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
         .iter()
         .map(|arg| format!(" '{}'", shell_single_quote(arg)))
         .collect::<String>();
-    let (override_captures, override_exports) = build_override_exports(explicit_env_overrides);
+    let mut override_env = explicit_env_overrides.clone();
+    if let Some(thread_id) = env.get(CODEX_THREAD_ID_ENV_VAR) {
+        override_env.insert(CODEX_THREAD_ID_ENV_VAR.to_string(), thread_id.clone());
+    }
+    let (override_captures, override_exports) = build_override_exports(&override_env);
+    let (proxy_captures, proxy_exports) = build_proxy_env_exports();
+    let runtime_path_prepend_exports =
+        runtime_path_prepends.shell_exports_after_snapshot(explicit_env_overrides);
+    let override_captures = join_shell_blocks([override_captures, proxy_captures]);
+    let override_exports = join_shell_blocks([
+        override_exports,
+        proxy_exports,
+        runtime_path_prepend_exports,
+    ]);
     let rewritten_script = if override_exports.is_empty() {
         format!(
             "if . '{snapshot_path}' >/dev/null 2>&1; then :; fi\n\nexec '{original_shell}' -c '{original_script}'{trailing_args}"
@@ -129,10 +318,60 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
 fn build_override_exports(explicit_env_overrides: &HashMap<String, String>) -> (String, String) {
     let mut keys = explicit_env_overrides
         .keys()
+        .map(String::as_str)
         .filter(|key| is_valid_shell_variable_name(key))
         .collect::<Vec<_>>();
     keys.sort_unstable();
 
+    build_override_exports_for_keys("__CODEX_SNAPSHOT_OVERRIDE", &keys)
+}
+
+fn build_proxy_env_exports() -> (String, String) {
+    let mut keys = PROXY_ENV_KEYS
+        .iter()
+        .copied()
+        .chain(CUSTOM_CA_ENV_KEYS)
+        .filter(|key| is_valid_shell_variable_name(key))
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys.dedup();
+
+    let (captures, restores) =
+        build_override_exports_for_keys("__CODEX_SNAPSHOT_PROXY_OVERRIDE", &keys);
+    let key = PROXY_ACTIVE_ENV_KEY;
+    let proxy_blocks = (
+        format!("{captures}\n__CODEX_SNAPSHOT_PROXY_ENV_SET=\"${{{key}+x}}\""),
+        format!(
+            "if [ -n \"$__CODEX_SNAPSHOT_PROXY_ENV_SET\" ] || [ -n \"${{{key}+x}}\" ]; then\n{restores}\nfi"
+        ),
+    );
+    let git_blocks = build_codex_proxy_git_ssh_command_exports();
+    (
+        join_shell_blocks([proxy_blocks.0, git_blocks.0]),
+        join_shell_blocks([proxy_blocks.1, git_blocks.1]),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn build_codex_proxy_git_ssh_command_exports() -> (String, String) {
+    let key = PROXY_GIT_SSH_COMMAND_ENV_KEY;
+    let marker_pattern = format!("{}\\ *", CODEX_PROXY_GIT_SSH_COMMAND_MARKER.trim_end());
+    (
+        format!(
+            "__CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_SET=\"${{{key}+x}}\"\n__CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND=\"${{{key}-}}\"\ncase \"$__CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND\" in\n  {marker_pattern}) __CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_LIVE_MARKED=1 ;;\n  *) __CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_LIVE_MARKED= ;;\nesac"
+        ),
+        format!(
+            "case \"${{{key}-}}\" in\n  {marker_pattern}) __CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED=1 ;;\n  *) __CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED= ;;\nesac\nif [ -n \"$__CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_LIVE_MARKED\" ]; then\n  if [ -z \"${{{key}+x}}\" ] || [ -n \"$__CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED\" ]; then\n    export {key}=\"$__CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND\"\n  fi\nelif [ -n \"$__CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED\" ]; then\n  if [ -n \"$__CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_SET\" ]; then\n    export {key}=\"$__CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND\"\n  else\n    unset {key}\n  fi\nfi"
+        ),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_codex_proxy_git_ssh_command_exports() -> (String, String) {
+    (String::new(), String::new())
+}
+
+fn build_override_exports_for_keys(variable_prefix: &str, keys: &[&str]) -> (String, String) {
     if keys.is_empty() {
         return (String::new(), String::new());
     }
@@ -141,9 +380,9 @@ fn build_override_exports(explicit_env_overrides: &HashMap<String, String>) -> (
         .iter()
         .enumerate()
         .map(|(idx, key)| {
-            format!(
-                "__CODEX_SNAPSHOT_OVERRIDE_SET_{idx}=\"${{{key}+x}}\"\n__CODEX_SNAPSHOT_OVERRIDE_{idx}=\"${{{key}-}}\""
-            )
+            let set_var = format!("{variable_prefix}_SET_{idx}");
+            let value_var = format!("{variable_prefix}_{idx}");
+            format!("{set_var}=\"${{{key}+x}}\"\n{value_var}=\"${{{key}-}}\"")
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -151,14 +390,24 @@ fn build_override_exports(explicit_env_overrides: &HashMap<String, String>) -> (
         .iter()
         .enumerate()
         .map(|(idx, key)| {
+            let set_var = format!("{variable_prefix}_SET_{idx}");
+            let value_var = format!("{variable_prefix}_{idx}");
             format!(
-                "if [ -n \"${{__CODEX_SNAPSHOT_OVERRIDE_SET_{idx}}}\" ]; then export {key}=\"${{__CODEX_SNAPSHOT_OVERRIDE_{idx}}}\"; else unset {key}; fi"
+                "if [ -n \"${{{set_var}}}\" ]; then export {key}=\"${{{value_var}}}\"; else unset {key}; fi"
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
 
     (captures, restores)
+}
+
+fn join_shell_blocks(blocks: impl IntoIterator<Item = String>) -> String {
+    blocks
+        .into_iter()
+        .filter(|block| !block.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn is_valid_shell_variable_name(name: &str) -> bool {
@@ -176,438 +425,137 @@ fn shell_single_quote(input: &str) -> String {
     input.replace('\'', r#"'"'"'"#)
 }
 
-#[cfg(all(test, unix))]
-mod tests {
+#[cfg(test)]
+mod disable_powershell_profile_tests {
     use super::*;
-    use crate::shell::ShellType;
-    use crate::shell_snapshot::ShellSnapshot;
     use pretty_assertions::assert_eq;
-    use std::path::PathBuf;
-    use std::process::Command;
-    use std::sync::Arc;
-    use tempfile::tempdir;
-    use tokio::sync::watch;
-
-    fn shell_with_snapshot(
-        shell_type: ShellType,
-        shell_path: &str,
-        snapshot_path: PathBuf,
-        snapshot_cwd: PathBuf,
-    ) -> Shell {
-        let (_tx, shell_snapshot) = watch::channel(Some(Arc::new(ShellSnapshot {
-            path: snapshot_path,
-            cwd: snapshot_cwd,
-        })));
-        Shell {
-            shell_type,
-            shell_path: PathBuf::from(shell_path),
-            shell_snapshot,
-        }
-    }
 
     #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_bootstraps_in_user_shell() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(&snapshot_path, "# Snapshot file\n").expect("write snapshot");
-        let session_shell = shell_with_snapshot(
-            ShellType::Zsh,
-            "/bin/zsh",
-            snapshot_path,
-            dir.path().to_path_buf(),
-        );
+    fn inserts_no_profile_for_elevated_windows_sandbox() {
         let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "echo hello".to_string(),
+            "powershell.exe".to_string(),
+            "-Command".to_string(),
+            "Write-Output ok".to_string(),
         ];
 
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
+        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
             &command,
-            &session_shell,
-            dir.path(),
-            &HashMap::new(),
+            Some(&ShellType::PowerShell),
+            SandboxType::WindowsRestrictedToken,
+            WindowsSandboxLevel::Elevated,
         );
 
-        assert_eq!(rewritten[0], "/bin/zsh");
-        assert_eq!(rewritten[1], "-c");
-        assert!(rewritten[2].contains("if . '"));
-        assert!(rewritten[2].contains("exec '/bin/bash' -c 'echo hello'"));
-    }
-
-    #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_escapes_single_quotes() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(&snapshot_path, "# Snapshot file\n").expect("write snapshot");
-        let session_shell = shell_with_snapshot(
-            ShellType::Zsh,
-            "/bin/zsh",
-            snapshot_path,
-            dir.path().to_path_buf(),
-        );
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "echo 'hello'".to_string(),
-        ];
-
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
-            &command,
-            &session_shell,
-            dir.path(),
-            &HashMap::new(),
-        );
-
-        assert!(rewritten[2].contains(r#"exec '/bin/bash' -c 'echo '"'"'hello'"'"''"#));
-    }
-
-    #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_uses_bash_bootstrap_shell() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(&snapshot_path, "# Snapshot file\n").expect("write snapshot");
-        let session_shell = shell_with_snapshot(
-            ShellType::Bash,
-            "/bin/bash",
-            snapshot_path,
-            dir.path().to_path_buf(),
-        );
-        let command = vec![
-            "/bin/zsh".to_string(),
-            "-lc".to_string(),
-            "echo hello".to_string(),
-        ];
-
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
-            &command,
-            &session_shell,
-            dir.path(),
-            &HashMap::new(),
-        );
-
-        assert_eq!(rewritten[0], "/bin/bash");
-        assert_eq!(rewritten[1], "-c");
-        assert!(rewritten[2].contains("if . '"));
-        assert!(rewritten[2].contains("exec '/bin/zsh' -c 'echo hello'"));
-    }
-
-    #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_uses_sh_bootstrap_shell() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(&snapshot_path, "# Snapshot file\n").expect("write snapshot");
-        let session_shell = shell_with_snapshot(
-            ShellType::Sh,
-            "/bin/sh",
-            snapshot_path,
-            dir.path().to_path_buf(),
-        );
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "echo hello".to_string(),
-        ];
-
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
-            &command,
-            &session_shell,
-            dir.path(),
-            &HashMap::new(),
-        );
-
-        assert_eq!(rewritten[0], "/bin/sh");
-        assert_eq!(rewritten[1], "-c");
-        assert!(rewritten[2].contains("if . '"));
-        assert!(rewritten[2].contains("exec '/bin/bash' -c 'echo hello'"));
-    }
-
-    #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_preserves_trailing_args() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(&snapshot_path, "# Snapshot file\n").expect("write snapshot");
-        let session_shell = shell_with_snapshot(
-            ShellType::Zsh,
-            "/bin/zsh",
-            snapshot_path,
-            dir.path().to_path_buf(),
-        );
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "printf '%s %s' \"$0\" \"$1\"".to_string(),
-            "arg0".to_string(),
-            "arg1".to_string(),
-        ];
-
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
-            &command,
-            &session_shell,
-            dir.path(),
-            &HashMap::new(),
-        );
-
-        assert!(
-            rewritten[2].contains(
-                r#"exec '/bin/bash' -c 'printf '"'"'%s %s'"'"' "$0" "$1"' 'arg0' 'arg1'"#
-            )
+        assert_eq!(
+            rewritten,
+            vec![
+                "powershell.exe".to_string(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Write-Output ok".to_string(),
+            ]
         );
     }
 
     #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_skips_when_cwd_mismatch() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(&snapshot_path, "# Snapshot file\n").expect("write snapshot");
-        let snapshot_cwd = dir.path().join("worktree-a");
-        let command_cwd = dir.path().join("worktree-b");
-        std::fs::create_dir_all(&snapshot_cwd).expect("create snapshot cwd");
-        std::fs::create_dir_all(&command_cwd).expect("create command cwd");
-        let session_shell =
-            shell_with_snapshot(ShellType::Zsh, "/bin/zsh", snapshot_path, snapshot_cwd);
+    fn inserts_no_profile_before_encoded_command() {
         let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "echo hello".to_string(),
+            "powershell.exe".to_string(),
+            "-EncodedCommand".to_string(),
+            "VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABvAGsA".to_string(),
         ];
 
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
+        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
             &command,
-            &session_shell,
-            &command_cwd,
-            &HashMap::new(),
+            Some(&ShellType::PowerShell),
+            SandboxType::WindowsRestrictedToken,
+            WindowsSandboxLevel::Elevated,
+        );
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "powershell.exe".to_string(),
+                "-NoProfile".to_string(),
+                "-EncodedCommand".to_string(),
+                "VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABvAGsA".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_existing_no_profile() {
+        let command = vec![
+            "pwsh.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Write-Output ok".to_string(),
+        ];
+
+        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
+            &command,
+            Some(&ShellType::PowerShell),
+            SandboxType::WindowsRestrictedToken,
+            WindowsSandboxLevel::Elevated,
         );
 
         assert_eq!(rewritten, command);
     }
 
     #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_accepts_dot_alias_cwd() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(&snapshot_path, "# Snapshot file\n").expect("write snapshot");
-        let session_shell = shell_with_snapshot(
-            ShellType::Zsh,
-            "/bin/zsh",
-            snapshot_path,
-            dir.path().to_path_buf(),
-        );
+    fn leaves_legacy_restricted_token_backend_alone() {
         let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "echo hello".to_string(),
+            "powershell.exe".to_string(),
+            "-Command".to_string(),
+            "Write-Output ok".to_string(),
         ];
-        let command_cwd = dir.path().join(".");
 
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
+        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
             &command,
-            &session_shell,
-            &command_cwd,
-            &HashMap::new(),
+            Some(&ShellType::PowerShell),
+            SandboxType::WindowsRestrictedToken,
+            WindowsSandboxLevel::RestrictedToken,
         );
 
-        assert_eq!(rewritten[0], "/bin/zsh");
-        assert_eq!(rewritten[1], "-c");
-        assert!(rewritten[2].contains("if . '"));
-        assert!(rewritten[2].contains("exec '/bin/bash' -c 'echo hello'"));
+        assert_eq!(rewritten, command);
     }
 
     #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_restores_explicit_override_precedence() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(
-            &snapshot_path,
-            "# Snapshot file\nexport TEST_ENV_SNAPSHOT=global\nexport SNAPSHOT_ONLY=from_snapshot\n",
-        )
-        .expect("write snapshot");
-        let session_shell = shell_with_snapshot(
-            ShellType::Bash,
-            "/bin/bash",
-            snapshot_path,
-            dir.path().to_path_buf(),
-        );
+    fn leaves_unsandboxed_attempts_alone() {
         let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "printf '%s|%s' \"$TEST_ENV_SNAPSHOT\" \"${SNAPSHOT_ONLY-unset}\"".to_string(),
+            "powershell.exe".to_string(),
+            "-Command".to_string(),
+            "Write-Output ok".to_string(),
         ];
-        let explicit_env_overrides =
-            HashMap::from([("TEST_ENV_SNAPSHOT".to_string(), "worktree".to_string())]);
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
-            &command,
-            &session_shell,
-            dir.path(),
-            &explicit_env_overrides,
-        );
-        let output = Command::new(&rewritten[0])
-            .args(&rewritten[1..])
-            .env("TEST_ENV_SNAPSHOT", "worktree")
-            .output()
-            .expect("run rewritten command");
 
-        assert!(output.status.success(), "command failed: {output:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            "worktree|from_snapshot"
+        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
+            &command,
+            Some(&ShellType::PowerShell),
+            SandboxType::None,
+            WindowsSandboxLevel::Elevated,
         );
+
+        assert_eq!(rewritten, command);
     }
 
     #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_keeps_snapshot_path_without_override() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(
-            &snapshot_path,
-            "# Snapshot file\nexport PATH='/snapshot/bin'\n",
-        )
-        .expect("write snapshot");
-        let session_shell = shell_with_snapshot(
-            ShellType::Bash,
-            "/bin/bash",
-            snapshot_path,
-            dir.path().to_path_buf(),
-        );
+    fn leaves_non_powershell_alone() {
         let command = vec![
             "/bin/bash".to_string(),
             "-lc".to_string(),
-            "printf '%s' \"$PATH\"".to_string(),
+            "echo ok".to_string(),
         ];
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
+
+        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
             &command,
-            &session_shell,
-            dir.path(),
-            &HashMap::new(),
-        );
-        let output = Command::new(&rewritten[0])
-            .args(&rewritten[1..])
-            .output()
-            .expect("run rewritten command");
-
-        assert!(output.status.success(), "command failed: {output:?}");
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "/snapshot/bin");
-    }
-
-    #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_applies_explicit_path_override() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(
-            &snapshot_path,
-            "# Snapshot file\nexport PATH='/snapshot/bin'\n",
-        )
-        .expect("write snapshot");
-        let session_shell = shell_with_snapshot(
-            ShellType::Bash,
-            "/bin/bash",
-            snapshot_path,
-            dir.path().to_path_buf(),
-        );
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "printf '%s' \"$PATH\"".to_string(),
-        ];
-        let explicit_env_overrides =
-            HashMap::from([("PATH".to_string(), "/worktree/bin".to_string())]);
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
-            &command,
-            &session_shell,
-            dir.path(),
-            &explicit_env_overrides,
-        );
-        let output = Command::new(&rewritten[0])
-            .args(&rewritten[1..])
-            .env("PATH", "/worktree/bin")
-            .output()
-            .expect("run rewritten command");
-
-        assert!(output.status.success(), "command failed: {output:?}");
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "/worktree/bin");
-    }
-
-    #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_does_not_embed_override_values_in_argv() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(
-            &snapshot_path,
-            "# Snapshot file\nexport OPENAI_API_KEY='snapshot-value'\n",
-        )
-        .expect("write snapshot");
-        let session_shell = shell_with_snapshot(
-            ShellType::Bash,
-            "/bin/bash",
-            snapshot_path,
-            dir.path().to_path_buf(),
-        );
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "printf '%s' \"$OPENAI_API_KEY\"".to_string(),
-        ];
-        let explicit_env_overrides = HashMap::from([(
-            "OPENAI_API_KEY".to_string(),
-            "super-secret-value".to_string(),
-        )]);
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
-            &command,
-            &session_shell,
-            dir.path(),
-            &explicit_env_overrides,
+            Some(&ShellType::Bash),
+            SandboxType::WindowsRestrictedToken,
+            WindowsSandboxLevel::Elevated,
         );
 
-        assert!(!rewritten[2].contains("super-secret-value"));
-        let output = Command::new(&rewritten[0])
-            .args(&rewritten[1..])
-            .env("OPENAI_API_KEY", "super-secret-value")
-            .output()
-            .expect("run rewritten command");
-        assert!(output.status.success(), "command failed: {output:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            "super-secret-value"
-        );
-    }
-
-    #[test]
-    fn maybe_wrap_shell_lc_with_snapshot_preserves_unset_override_variables() {
-        let dir = tempdir().expect("create temp dir");
-        let snapshot_path = dir.path().join("snapshot.sh");
-        std::fs::write(
-            &snapshot_path,
-            "# Snapshot file\nexport CODEX_TEST_UNSET_OVERRIDE='snapshot-value'\n",
-        )
-        .expect("write snapshot");
-        let session_shell = shell_with_snapshot(
-            ShellType::Bash,
-            "/bin/bash",
-            snapshot_path,
-            dir.path().to_path_buf(),
-        );
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "if [ \"${CODEX_TEST_UNSET_OVERRIDE+x}\" = x ]; then printf 'set:%s' \"$CODEX_TEST_UNSET_OVERRIDE\"; else printf 'unset'; fi".to_string(),
-        ];
-        let explicit_env_overrides = HashMap::from([(
-            "CODEX_TEST_UNSET_OVERRIDE".to_string(),
-            "worktree-value".to_string(),
-        )]);
-        let rewritten = maybe_wrap_shell_lc_with_snapshot(
-            &command,
-            &session_shell,
-            dir.path(),
-            &explicit_env_overrides,
-        );
-
-        let output = Command::new(&rewritten[0])
-            .args(&rewritten[1..])
-            .env_remove("CODEX_TEST_UNSET_OVERRIDE")
-            .output()
-            .expect("run rewritten command");
-        assert!(output.status.success(), "command failed: {output:?}");
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "unset");
+        assert_eq!(rewritten, command);
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "mod_tests.rs"]
+mod tests;

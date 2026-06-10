@@ -1110,13 +1110,13 @@ async fn load_project_tasks(
         )
     })?;
 
-    let branch = codex_core::git_info::current_branch_name(cwd).await;
+    let branch = codex_git_utils::current_branch_name(cwd).await;
     let mut tasks = issues
         .into_iter()
         .map(|issue| issue_to_task_item(&config, issue, branch.clone()))
         .collect::<Vec<_>>();
 
-    tasks.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+    tasks.sort_by_key(|left| left.title.to_lowercase());
 
     Ok(TaskPickerPayload::TaskList {
         workspace: config.workspace,

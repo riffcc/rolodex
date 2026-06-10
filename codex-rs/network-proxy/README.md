@@ -33,27 +33,45 @@ allow_upstream_proxy = true
 # If you want to expose these listeners beyond localhost, you must opt in explicitly.
 dangerously_allow_non_loopback_proxy = false
 mode = "full" # default when unset; use "limited" for read-only mode
-# When true, HTTPS CONNECT can be terminated so limited-mode method policy still applies.
-mitm = false
+# HTTPS MITM is enabled automatically when `mode = "limited"` or when MITM hooks are configured.
 # CA cert/key are managed internally under $CODEX_HOME/proxy/ (ca.pem + ca.key).
-
-# Hosts must match the allowlist (unless denied).
-# Use exact hosts or scoped wildcards like `*.openai.com` or `**.openai.com`.
-# The global `*` wildcard is rejected.
-# If `allowed_domains` is empty, the proxy blocks requests until an allowlist is configured.
-allowed_domains = ["*.openai.com", "localhost", "127.0.0.1", "::1"]
-denied_domains = ["evil.example"]
+# When MITM is active, spawned commands receive CA bundle env vars pointing at
+# immutable bundles under $CODEX_HOME/proxy/ so common HTTPS clients trust the managed CA.
 
 # If false, local/private networking is rejected. Explicit allowlisting of local IP literals
 # (or `localhost`) is required to permit them.
 # Hostnames that resolve to local/private IPs are still blocked even if allowlisted.
 allow_local_binding = false
 
-# macOS-only: allows proxying to a unix socket when request includes `x-unix-socket: /path`.
-allow_unix_sockets = ["/tmp/example.sock"]
 # DANGEROUS (macOS-only): bypasses unix socket allowlisting and permits any
 # absolute socket path from `x-unix-socket`.
 dangerously_allow_all_unix_sockets = false
+
+# Hosts must match the allowlist (unless denied).
+# Use exact hosts or scoped wildcards like `*.openai.com` or `**.openai.com`.
+# The global `*` wildcard is rejected.
+# If no domain entries are marked `allow`, the proxy blocks requests until an allowlist is configured.
+[permissions.workspace.network.domains]
+"*.openai.com" = "allow"
+"localhost" = "allow"
+"127.0.0.1" = "allow"
+"::1" = "allow"
+"evil.example" = "deny"
+
+# MITM hooks match HTTPS requests after CONNECT is terminated.
+[permissions.workspace.network.mitm.hooks.github_write]
+host = "api.github.com"
+methods = ["POST", "PUT"]
+path_prefixes = ["/repos/openai/"]
+action = ["strip_auth"]
+
+# Named actions can be shared across hooks and overridden by higher-precedence config layers.
+[permissions.workspace.network.mitm.actions.strip_auth]
+strip_request_headers = ["authorization"]
+
+# macOS-only: allows proxying to a unix socket when request includes `x-unix-socket: /path`.
+[permissions.workspace.network.unix_sockets]
+"/tmp/example.sock" = "allow"
 ```
 
 ### 2) Run the proxy
@@ -123,7 +141,7 @@ let handle = proxy.run().await?;
 handle.shutdown().await?;
 ```
 
-When unix socket proxying is enabled (`allow_unix_sockets` or
+When unix socket proxying is enabled (`unix_sockets` or
 `dangerously_allow_all_unix_sockets`), proxy bind overrides are still clamped to loopback to
 avoid turning the proxy into a remote bridge to local daemons.
 
@@ -188,9 +206,9 @@ Audit events intentionally avoid logging full URL/path/query data.
 This section documents the protections implemented by `codex-network-proxy`, and the boundaries of
 what it can reasonably guarantee.
 
-- Allowlist-first policy: if `allowed_domains` is empty, requests are blocked until an allowlist is configured.
-- Domain patterns: exact hosts plus scoped wildcards (`*.example.com`, `**.example.com`) are supported; the global `*` wildcard is rejected.
-- Deny wins: entries in `denied_domains` always override the allowlist.
+- Allowlist-first policy: if `domains` has no `allow` entries, requests are blocked until an allowlist is configured.
+- Domain patterns: exact hosts are supported, `*.example.com` matches subdomains only, and `**.example.com` matches the apex plus subdomains; the global `*` wildcard is only accepted when explicitly enabled for allowlist compilation and is otherwise rejected.
+- Deny wins: `domains` entries marked `deny` always override the allowlist.
 - Local/private network protection: when `allow_local_binding = false`, the proxy blocks loopback
   and common private/link-local ranges. Explicit allowlisting of local IP literals (or `localhost`)
   is required to permit them; hostnames that resolve to local/private IPs are still blocked even if

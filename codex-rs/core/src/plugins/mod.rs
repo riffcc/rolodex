@@ -1,39 +1,18 @@
-mod curated_repo;
+mod discoverable;
 mod injection;
-mod manager;
-mod manifest;
-mod marketplace;
+mod mentions;
 mod render;
-mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 
-pub(crate) use curated_repo::curated_plugins_repo_path;
-pub(crate) use curated_repo::sync_openai_plugins_repo;
+pub(crate) use codex_plugin::PluginCapabilitySummary;
+
+pub(crate) use discoverable::list_tool_suggest_discoverable_plugins;
 pub(crate) use injection::build_plugin_injections;
-pub use manager::AppConnectorId;
-pub use manager::ConfiguredMarketplacePluginSummary;
-pub use manager::ConfiguredMarketplaceSummary;
-pub use manager::LoadedPlugin;
-pub use manager::PluginCapabilitySummary;
-pub use manager::PluginInstallError;
-pub use manager::PluginInstallOutcome;
-pub use manager::PluginInstallRequest;
-pub use manager::PluginLoadOutcome;
-pub use manager::PluginRemoteSyncError;
-pub use manager::PluginUninstallError;
-pub use manager::PluginsManager;
-pub use manager::RemotePluginSyncResult;
-pub use manager::load_plugin_apps;
-pub(crate) use manager::plugin_namespace_for_skill_path;
-pub use manifest::PluginManifestInterfaceSummary;
-pub(crate) use manifest::PluginManifestPaths;
-pub(crate) use manifest::load_plugin_manifest;
-pub(crate) use manifest::plugin_manifest_interface;
-pub(crate) use manifest::plugin_manifest_name;
-pub(crate) use manifest::plugin_manifest_paths;
-pub use marketplace::MarketplaceError;
-pub use marketplace::MarketplacePluginAuthPolicy;
-pub use marketplace::MarketplacePluginInstallPolicy;
-pub use marketplace::MarketplacePluginSourceSummary;
 pub(crate) use render::render_explicit_plugin_instructions;
-pub(crate) use render::render_plugins_section;
-pub use store::PluginId;
+
+pub(crate) use mentions::build_connector_slug_counts;
+pub(crate) use mentions::build_skill_name_counts;
+pub(crate) use mentions::collect_explicit_app_ids;
+pub(crate) use mentions::collect_explicit_plugin_mentions;
+pub(crate) use mentions::collect_tool_mentions_from_messages;

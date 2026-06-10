@@ -9,7 +9,9 @@ META = ROOT / ".github" / "rolodex" / "release.json"
 
 
 def git_short_sha() -> str:
-    return subprocess.check_output(["git", "rev-parse", "--short=7", "HEAD"], cwd=ROOT, text=True).strip()
+    return subprocess.check_output(
+        ["git", "rev-parse", "--short=7", "HEAD"], cwd=ROOT, text=True
+    ).strip()
 
 
 def load_meta() -> dict:
@@ -33,7 +35,11 @@ def debian_version(meta: dict, sha: str, prerelease: bool) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--format", choices=["stable", "prerelease", "debian-stable", "debian-prerelease", "json"], required=True)
+    parser.add_argument(
+        "--format",
+        choices=["stable", "prerelease", "debian-stable", "debian-prerelease", "json"],
+        required=True,
+    )
     parser.add_argument("--sha", default=None)
     args = parser.parse_args()
 

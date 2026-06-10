@@ -17,7 +17,7 @@ use crate::protocol::common::EXPERIMENTAL_CLIENT_METHODS;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::RolloutLine;
 use schemars::JsonSchema;
 use schemars::schema_for;
 use serde::Serialize;
@@ -39,14 +39,15 @@ use ts_rs::TS;
 pub(crate) const GENERATED_TS_HEADER: &str = "// GENERATED CODE! DO NOT MODIFY BY HAND!\n\n";
 const IGNORED_DEFINITIONS: &[&str] = &["Option<()>"];
 const JSON_V1_ALLOWLIST: &[&str] = &["InitializeParams", "InitializeResponse"];
+const EXPERIMENTAL_CLIENT_METHOD_DEPENDENCY_TYPES: &[&str] =
+    &["RemoteControlClient", "RemoteControlClientsListOrder"];
 const SPECIAL_DEFINITIONS: &[&str] = &[
     "ClientNotification",
     "ClientRequest",
-    "EventMsg",
     "ServerNotification",
     "ServerRequest",
 ];
-const FLAT_V2_SHARED_DEFINITIONS: &[&str] = &["ClientRequest", "EventMsg", "ServerNotification"];
+const FLAT_V2_SHARED_DEFINITIONS: &[&str] = &["ClientRequest", "ServerNotification"];
 const V1_CLIENT_REQUEST_METHODS: &[&str] =
     &["getConversationSummary", "gitDiffToRemote", "getAuthStatus"];
 const EXCLUDED_SERVER_NOTIFICATION_METHODS_FOR_JSON: &[&str] = &["rawResponseItem/completed"];
@@ -119,7 +120,6 @@ pub fn generate_ts_with_options(
     ServerRequest::export_all_to(out_dir)?;
     export_server_responses(out_dir)?;
     ServerNotification::export_all_to(out_dir)?;
-    EventMsg::export_all_to(out_dir)?;
 
     if !options.experimental_api {
         filter_experimental_ts(out_dir)?;
@@ -131,12 +131,7 @@ pub fn generate_ts_with_options(
     }
 
     // Ensure our header is present on all TS files (root + subdirs like v2/).
-    let mut ts_files = Vec::new();
-    let should_collect_ts_files =
-        options.ensure_headers || (options.run_prettier && prettier.is_some());
-    if should_collect_ts_files {
-        ts_files = ts_files_in_recursive(out_dir)?;
-    }
+    let ts_files = ts_files_in_recursive(out_dir)?;
 
     if options.ensure_headers {
         let worker_count = thread::available_parallelism()
@@ -181,11 +176,19 @@ pub fn generate_ts_with_options(
         }
     }
 
+    trim_trailing_whitespace_in_ts_files(&ts_files)?;
+
     Ok(())
 }
 
 pub fn generate_json(out_dir: &Path) -> Result<()> {
-    generate_json_with_experimental(out_dir, false)
+    generate_json_with_experimental(out_dir, /*experimental_api*/ false)
+}
+
+pub fn generate_internal_json_schema(out_dir: &Path) -> Result<()> {
+    ensure_dir(out_dir)?;
+    write_json_schema::<RolloutLine>(out_dir, "RolloutLine")?;
+    Ok(())
 }
 
 pub fn generate_json_with_experimental(out_dir: &Path, experimental_api: bool) -> Result<()> {
@@ -202,7 +205,6 @@ pub fn generate_json_with_experimental(out_dir: &Path, experimental_api: bool) -
         |d| write_json_schema_with_return::<crate::ServerRequest>(d, "ServerRequest"),
         |d| write_json_schema_with_return::<crate::ClientNotification>(d, "ClientNotification"),
         |d| write_json_schema_with_return::<crate::ServerNotification>(d, "ServerNotification"),
-        |d| write_json_schema_with_return::<EventMsg>(d, "EventMsg"),
     ];
 
     let mut schemas: Vec<GeneratedSchema> = Vec::new();
@@ -554,6 +556,7 @@ fn experimental_method_types() -> HashSet<String> {
     let mut type_names = HashSet::new();
     collect_experimental_type_names(EXPERIMENTAL_CLIENT_METHOD_PARAM_TYPES, &mut type_names);
     collect_experimental_type_names(EXPERIMENTAL_CLIENT_METHOD_RESPONSE_TYPES, &mut type_names);
+    collect_experimental_type_names(EXPERIMENTAL_CLIENT_METHOD_DEPENDENCY_TYPES, &mut type_names);
     type_names
 }
 
@@ -736,11 +739,11 @@ fn find_top_level_brace_span(input: &str) -> Option<(usize, usize)> {
     let mut state = ScanState::default();
     let mut open_index = None;
     for (index, ch) in input.char_indices() {
-        if !state.in_string() && ch == '{' && state.depth.is_top_level() {
+        if !state.in_ignored_syntax() && ch == '{' && state.depth.is_top_level() {
             open_index = Some(index);
         }
         state.observe(ch);
-        if !state.in_string()
+        if !state.in_ignored_syntax()
             && ch == '}'
             && state.depth.is_top_level()
             && let Some(open) = open_index
@@ -760,7 +763,7 @@ fn split_top_level_multi(input: &str, delimiters: &[char]) -> Vec<String> {
     let mut start = 0usize;
     let mut parts = Vec::new();
     for (index, ch) in input.char_indices() {
-        if !state.in_string() && state.depth.is_top_level() && delimiters.contains(&ch) {
+        if !state.in_ignored_syntax() && state.depth.is_top_level() && delimiters.contains(&ch) {
             let part = input[start..index].trim();
             if !part.is_empty() {
                 parts.push(part.to_string());
@@ -882,22 +885,58 @@ struct ScanState {
     depth: Depth,
     string_delim: Option<char>,
     escape: bool,
+    block_comment: bool,
+    line_comment: bool,
+    previous_char: Option<char>,
 }
 
 impl ScanState {
     fn observe(&mut self, ch: char) {
+        if self.line_comment {
+            if ch == '\n' {
+                self.line_comment = false;
+            }
+            self.previous_char = Some(ch);
+            return;
+        }
+
+        if self.block_comment {
+            if self.previous_char == Some('*') && ch == '/' {
+                self.block_comment = false;
+                self.previous_char = None;
+            } else {
+                self.previous_char = Some(ch);
+            }
+            return;
+        }
+
         if let Some(delim) = self.string_delim {
             if self.escape {
                 self.escape = false;
+                self.previous_char = Some(ch);
                 return;
             }
             if ch == '\\' {
                 self.escape = true;
+                self.previous_char = Some(ch);
                 return;
             }
             if ch == delim {
                 self.string_delim = None;
             }
+            self.previous_char = Some(ch);
+            return;
+        }
+
+        if self.previous_char == Some('/') && ch == '/' {
+            self.line_comment = true;
+            self.previous_char = Some(ch);
+            return;
+        }
+
+        if self.previous_char == Some('/') && ch == '*' {
+            self.block_comment = true;
+            self.previous_char = Some(ch);
             return;
         }
 
@@ -912,17 +951,16 @@ impl ScanState {
             '(' => self.depth.paren += 1,
             ')' => self.depth.paren = (self.depth.paren - 1).max(0),
             '<' => self.depth.angle += 1,
-            '>' => {
-                if self.depth.angle > 0 {
-                    self.depth.angle -= 1;
-                }
+            '>' if self.depth.angle > 0 => {
+                self.depth.angle -= 1;
             }
             _ => {}
         }
+        self.previous_char = Some(ch);
     }
 
-    fn in_string(&self) -> bool {
-        self.string_delim.is_some()
+    fn in_ignored_syntax(&self) -> bool {
+        self.string_delim.is_some() || self.block_comment || self.line_comment
     }
 }
 
@@ -1026,8 +1064,8 @@ fn build_schema_bundle(schemas: Vec<GeneratedSchema>) -> Result<Value> {
 /// Build a datamodel-code-generator-friendly v2 bundle from the mixed export.
 ///
 /// The full bundle keeps v2 schemas nested under `definitions.v2`, plus a few
-/// shared root definitions like `ClientRequest`, `EventMsg`, and
-/// `ServerNotification`. Python codegen only walks one definitions map level, so
+/// shared root definitions like `ClientRequest` and `ServerNotification`.
+/// Python codegen only walks one definitions map level, so
 /// a direct feed would treat `v2` itself as a schema and miss unreferenced v2
 /// leaves. This helper flattens all v2 definitions to the root definitions map,
 /// then pulls in the shared root schemas and any non-v2 transitive deps they
@@ -1939,6 +1977,32 @@ fn ts_files_in_recursive(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn trim_trailing_whitespace_in_ts_files(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let trimmed = trim_trailing_line_whitespace(&content);
+        if trimmed != content {
+            fs::write(path, trimmed)
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn trim_trailing_line_whitespace(content: &str) -> String {
+    let mut trimmed = String::with_capacity(content.len());
+    for line in content.split_inclusive('\n') {
+        if let Some(line_without_newline) = line.strip_suffix('\n') {
+            trimmed.push_str(line_without_newline.trim_end_matches([' ', '\t']));
+            trimmed.push('\n');
+        } else {
+            trimmed.push_str(line.trim_end_matches([' ', '\t']));
+        }
+    }
+    trimmed
+}
+
 /// Generate an index.ts file that re-exports all generated types.
 /// This allows consumers to import all types from a single file.
 fn generate_index_ts(out_dir: &Path) -> Result<PathBuf> {
@@ -1988,7 +2052,7 @@ pub(crate) fn generate_index_ts_tree(tree: &mut BTreeMap<PathBuf, String>) {
     if !v2_entries.is_empty() {
         tree.insert(
             PathBuf::from("v2").join("index.ts"),
-            index_ts_entries(&v2_entries, false),
+            index_ts_entries(&v2_entries, /*has_v2_ts*/ false),
         );
     }
 }
@@ -2008,6 +2072,7 @@ fn index_ts_entries(paths: &[&Path], has_v2_ts: bool) -> String {
             let stem = path.file_stem()?.to_string_lossy().into_owned();
             if stem == "index" { None } else { Some(stem) }
         })
+        .filter(|stem| stem != "EventMsg")
         .collect();
     stems.sort();
     stems.dedup();
@@ -2050,7 +2115,12 @@ mod tests {
             client_request_ts.contains("MockExperimentalMethodParams"),
             false
         );
-        assert_eq!(fixture_tree.contains_key(Path::new("EventMsg.ts")), true);
+        let typescript_index = std::str::from_utf8(
+            fixture_tree
+                .get(Path::new("index.ts"))
+                .ok_or_else(|| anyhow::anyhow!("missing index.ts fixture"))?,
+        )?;
+        assert_eq!(typescript_index.contains("export type { EventMsg }"), false);
         let thread_start_ts = std::str::from_utf8(
             fixture_tree
                 .get(Path::new("v2/ThreadStartParams.ts"))
@@ -2063,6 +2133,14 @@ mod tests {
         );
         assert_eq!(
             fixture_tree.contains_key(Path::new("v2/MockExperimentalMethodResponse.ts")),
+            false
+        );
+        assert_eq!(
+            fixture_tree.contains_key(Path::new("v2/RemoteControlClient.ts")),
+            false
+        );
+        assert_eq!(
+            fixture_tree.contains_key(Path::new("v2/RemoteControlClientsListOrder.ts")),
             false
         );
 
@@ -2143,20 +2221,14 @@ mod tests {
                         continue;
                     }
                     match ch {
-                        '\\' => {
-                            if in_single || in_double {
-                                escape = true;
-                            }
+                        '\\' if (in_single || in_double) => {
+                            escape = true;
                         }
-                        '\'' => {
-                            if !in_double {
-                                in_single = !in_single;
-                            }
+                        '\'' if !in_double => {
+                            in_single = !in_single;
                         }
-                        '"' => {
-                            if !in_single {
-                                in_double = !in_double;
-                            }
+                        '"' if !in_single => {
+                            in_double = !in_double;
                         }
                         '{' if !in_single && !in_double => level_brace += 1,
                         '}' if !in_single && !in_double => level_brace -= 1,
@@ -2287,10 +2359,6 @@ mod tests {
             v2::CommandExecutionRequestApprovalParams::export_to_string()?;
         assert_eq!(
             command_execution_request_approval_ts.contains("additionalPermissions"),
-            true
-        );
-        assert_eq!(
-            command_execution_request_approval_ts.contains("skillMetadata"),
             true
         );
 
@@ -2530,7 +2598,6 @@ mod tests {
         assert_eq!(definitions.contains_key("v2"), false);
         assert_eq!(definitions.contains_key("ThreadStartParams"), true);
         assert_eq!(definitions.contains_key("ThreadStartResponse"), true);
-        assert_eq!(definitions.contains_key("ThreadStartedEventMsg"), true);
         assert_eq!(definitions.contains_key("ThreadStartedNotification"), true);
         assert_eq!(definitions.contains_key("SharedHelper"), true);
         assert_eq!(definitions.contains_key("SharedLeaf"), true);
@@ -2557,22 +2624,6 @@ mod tests {
                 "LogoutRequest".to_string(),
                 "StartRequest".to_string(),
             ])
-        );
-        let event_titles: BTreeSet<String> = definitions["EventMsg"]["oneOf"]
-            .as_array()
-            .expect("EventMsg should remain a oneOf")
-            .iter()
-            .map(|variant| {
-                variant
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            })
-            .collect();
-        assert_eq!(
-            event_titles,
-            BTreeSet::from(["".to_string(), "WarningEventMsg".to_string(),])
         );
         let notification_titles: BTreeSet<String> = definitions["ServerNotification"]["oneOf"]
             .as_array()
@@ -2684,6 +2735,71 @@ export type Config = { stableField: Keep, unstableField: string | null } & ({ [k
     }
 
     #[test]
+    fn experimental_type_fields_ts_filter_handles_generated_command_params_shape() -> Result<()> {
+        let output_dir = std::env::temp_dir().join(format!("codex_ts_filter_{}", Uuid::now_v7()));
+        fs::create_dir_all(&output_dir)?;
+
+        struct TempDirGuard(PathBuf);
+
+        impl Drop for TempDirGuard {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let _guard = TempDirGuard(output_dir.clone());
+        let path = output_dir.join("CommandExecParams.ts");
+        let content = r#"import type { CommandExecTerminalSize } from "./CommandExecTerminalSize";
+import type { SandboxPolicy } from "./SandboxPolicy";
+
+export type CommandExecParams = {/**
+ * Command argv vector. Empty arrays are rejected.
+ */
+command: Array<string>, /**
+ * Optional environment overrides merged into the server-computed
+ * environment.
+ */
+env?: { [key in string]?: string | null } | null, /**
+ * Optional initial PTY size in character cells. Only valid when `tty` is
+ * true.
+ */
+size?: CommandExecTerminalSize | null, /**
+ * Optional sandbox policy for this command.
+ *
+ * Uses the same shape as thread/turn execution sandbox configuration and
+ * defaults to the user's configured policy when omitted. Cannot be
+ * combined with `permissionProfile`.
+ */
+sandboxPolicy?: SandboxPolicy | null,
+/**
+ * Optional active permissions profile id for this command.
+ *
+ * Defaults to the user's configured permissions when omitted. Cannot be
+ * combined with `sandboxPolicy`.
+ */
+permissionProfile?: string | null};
+"#;
+        fs::write(&path, content)?;
+
+        static CUSTOM_FIELD: crate::experimental_api::ExperimentalField =
+            crate::experimental_api::ExperimentalField {
+                type_name: "CommandExecParams",
+                field_name: "permissionProfile",
+                reason: "command/exec.permissionProfile",
+            };
+        filter_experimental_type_fields_ts(&output_dir, &[&CUSTOM_FIELD])?;
+
+        let filtered = fs::read_to_string(&path)?;
+        assert_eq!(filtered.contains("permissionProfile?: string"), false);
+        assert_eq!(filtered.contains("sandboxPolicy?: SandboxPolicy"), true);
+        assert_eq!(
+            filtered.contains(r#"import type { SandboxPolicy } from "./SandboxPolicy";"#),
+            true
+        );
+        Ok(())
+    }
+
+    #[test]
     fn stable_schema_filter_removes_mock_experimental_method() -> Result<()> {
         let output_dir = std::env::temp_dir().join(format!("codex_schema_{}", Uuid::now_v7()));
         fs::create_dir(&output_dir)?;
@@ -2702,7 +2818,7 @@ export type Config = { stableField: Keep, unstableField: string | null } & ({ [k
     fn generate_json_filters_experimental_fields_and_methods() -> Result<()> {
         let output_dir = std::env::temp_dir().join(format!("codex_schema_{}", Uuid::now_v7()));
         fs::create_dir(&output_dir)?;
-        generate_json_with_experimental(&output_dir, false)?;
+        generate_json_with_experimental(&output_dir, /*experimental_api*/ false)?;
 
         let thread_start_json =
             fs::read_to_string(output_dir.join("v2").join("ThreadStartParams.json"))?;
@@ -2713,22 +2829,18 @@ export type Config = { stableField: Keep, unstableField: string | null } & ({ [k
             command_execution_request_approval_json.contains("additionalPermissions"),
             false
         );
-        assert_eq!(
-            command_execution_request_approval_json.contains("skillMetadata"),
-            false
-        );
 
         let client_request_json = fs::read_to_string(output_dir.join("ClientRequest.json"))?;
         assert_eq!(
             client_request_json.contains("mock/experimentalMethod"),
             false
         );
+        assert_eq!(output_dir.join("EventMsg.json").exists(), false);
 
         let bundle_json =
             fs::read_to_string(output_dir.join("codex_app_server_protocol.schemas.json"))?;
         assert_eq!(bundle_json.contains("mockExperimentalField"), false);
         assert_eq!(bundle_json.contains("additionalPermissions"), false);
-        assert_eq!(bundle_json.contains("skillMetadata"), false);
         assert_eq!(bundle_json.contains("MockExperimentalMethodParams"), false);
         assert_eq!(
             bundle_json.contains("MockExperimentalMethodResponse"),
@@ -2738,13 +2850,17 @@ export type Config = { stableField: Keep, unstableField: string | null } & ({ [k
             fs::read_to_string(output_dir.join("codex_app_server_protocol.v2.schemas.json"))?;
         assert_eq!(flat_v2_bundle_json.contains("mockExperimentalField"), false);
         assert_eq!(flat_v2_bundle_json.contains("additionalPermissions"), false);
-        assert_eq!(flat_v2_bundle_json.contains("skillMetadata"), false);
         assert_eq!(
             flat_v2_bundle_json.contains("MockExperimentalMethodParams"),
             false
         );
         assert_eq!(
             flat_v2_bundle_json.contains("MockExperimentalMethodResponse"),
+            false
+        );
+        assert_eq!(flat_v2_bundle_json.contains("RemoteControlClient"), false);
+        assert_eq!(
+            flat_v2_bundle_json.contains("RemoteControlClientsListOrder"),
             false
         );
         assert_eq!(flat_v2_bundle_json.contains("#/definitions/v2/"), false);
@@ -2805,29 +2921,7 @@ export type Config = { stableField: Keep, unstableField: string | null } & ({ [k
         .map(str::to_string)
         .collect();
         assert_eq!(missing_server_notification_methods, Vec::<String>::new());
-        let event_types: BTreeSet<String> = definitions["EventMsg"]["oneOf"]
-            .as_array()
-            .expect("flat v2 EventMsg should remain a oneOf")
-            .iter()
-            .filter_map(|variant| {
-                variant["properties"]["type"]["enum"]
-                    .as_array()
-                    .and_then(|values| values.first())
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect();
-        let missing_event_types: Vec<String> = [
-            "agent_message_delta",
-            "task_complete",
-            "warning",
-            "web_search_begin",
-        ]
-        .into_iter()
-        .filter(|event_type| !event_types.contains(*event_type))
-        .map(str::to_string)
-        .collect();
-        assert_eq!(missing_event_types, Vec::<String>::new());
+        assert_eq!(definitions.contains_key("EventMsg"), false);
         assert_eq!(
             output_dir
                 .join("v2")
@@ -2842,6 +2936,48 @@ export type Config = { stableField: Keep, unstableField: string | null } & ({ [k
                 .exists(),
             false
         );
+        assert_eq!(
+            output_dir
+                .join("v2")
+                .join("RemoteControlClient.json")
+                .exists(),
+            false
+        );
+        assert_eq!(
+            output_dir
+                .join("v2")
+                .join("RemoteControlClientsListOrder.json")
+                .exists(),
+            false
+        );
+
+        let _cleanup = fs::remove_dir_all(&output_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn generate_json_includes_remote_control_methods_with_experimental_api() -> Result<()> {
+        let output_dir = std::env::temp_dir().join(format!("codex_schema_{}", Uuid::now_v7()));
+        fs::create_dir(&output_dir)?;
+        generate_json_with_experimental(&output_dir, /*experimental_api*/ true)?;
+
+        let client_request_json = fs::read_to_string(output_dir.join("ClientRequest.json"))?;
+        assert!(client_request_json.contains("remoteControl/pairing/start"));
+        assert!(client_request_json.contains("remoteControl/pairing/status"));
+        assert!(client_request_json.contains("remoteControl/client/list"));
+        assert!(client_request_json.contains("remoteControl/client/revoke"));
+        for schema in [
+            "RemoteControlPairingStartParams.json",
+            "RemoteControlPairingStartResponse.json",
+            "RemoteControlPairingStatusParams.json",
+            "RemoteControlPairingStatusResponse.json",
+            "RemoteControlClientsListParams.json",
+            "RemoteControlClientsListResponse.json",
+            "RemoteControlClientsRevokeParams.json",
+            "RemoteControlClientsRevokeResponse.json",
+        ] {
+            assert!(output_dir.join("v2").join(schema).exists());
+        }
 
         let _cleanup = fs::remove_dir_all(&output_dir);
         Ok(())

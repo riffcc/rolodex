@@ -1,11 +1,11 @@
-use crate::auth::AuthProvider;
+use crate::auth::SharedAuthProvider;
 use crate::common::ResponseStream;
 use crate::common::ResponsesApiRequest;
 use crate::common::TextControls;
 use crate::endpoint::responses::ResponsesOptions;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
-use crate::requests::headers::build_conversation_headers;
+use crate::requests::headers::build_session_headers;
 use crate::requests::headers::insert_header;
 use crate::requests::headers::subagent_header;
 use crate::requests::responses::Compression;
@@ -25,13 +25,17 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tracing::warn;
 
-pub struct ChatCompletionsClient<T: HttpTransport, A: AuthProvider> {
-    session: EndpointSession<T, A>,
+pub struct ChatCompletionsClient<T: HttpTransport> {
+    session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
 }
 
-impl<T: HttpTransport, A: AuthProvider> ChatCompletionsClient<T, A> {
-    pub fn new(transport: T, provider: crate::provider::Provider, auth: A) -> Self {
+impl<T: HttpTransport> ChatCompletionsClient<T> {
+    pub fn new(
+        transport: T,
+        provider: crate::provider::Provider,
+        auth: SharedAuthProvider,
+    ) -> Self {
         Self {
             session: EndpointSession::new(transport, provider, auth),
             sse_telemetry: None,
@@ -55,7 +59,8 @@ impl<T: HttpTransport, A: AuthProvider> ChatCompletionsClient<T, A> {
         options: ResponsesOptions,
     ) -> Result<ResponseStream, ApiError> {
         let ResponsesOptions {
-            conversation_id,
+            session_id,
+            thread_id,
             session_source,
             extra_headers,
             compression,
@@ -64,10 +69,10 @@ impl<T: HttpTransport, A: AuthProvider> ChatCompletionsClient<T, A> {
         let body = translate_responses_request_to_chat_body(request)?;
 
         let mut headers = extra_headers;
-        if let Some(ref conv_id) = conversation_id {
-            insert_header(&mut headers, "x-client-request-id", conv_id);
+        if let Some(ref thread_id) = thread_id {
+            insert_header(&mut headers, "x-client-request-id", thread_id);
         }
-        headers.extend(build_conversation_headers(conversation_id));
+        headers.extend(build_session_headers(session_id, thread_id));
         if let Some(subagent) = subagent_header(&session_source) {
             insert_header(&mut headers, "x-openai-subagent", &subagent);
         }
@@ -202,13 +207,17 @@ fn translate_input_to_chat_messages(
                 )))
             }
             ResponseItem::Message { .. }
+            | ResponseItem::AgentMessage { .. }
             | ResponseItem::FunctionCallOutput { .. }
             | ResponseItem::CustomToolCallOutput { .. }
             | ResponseItem::Reasoning { .. }
+            | ResponseItem::ToolSearchCall { .. }
+            | ResponseItem::ToolSearchOutput { .. }
             | ResponseItem::WebSearchCall { .. }
             | ResponseItem::ImageGenerationCall { .. }
-            | ResponseItem::GhostSnapshot { .. }
             | ResponseItem::Compaction { .. }
+            | ResponseItem::CompactionTrigger
+            | ResponseItem::ContextCompaction { .. }
             | ResponseItem::Other => Ok(None),
         }
     };
@@ -257,16 +266,22 @@ fn translate_input_to_chat_messages(
             | ResponseItem::CustomToolCall { .. }
             | ResponseItem::LocalShellCall { .. } => None,
             ResponseItem::FunctionCallOutput { call_id, output }
-            | ResponseItem::CustomToolCallOutput { call_id, output } => Some(json!({
+            | ResponseItem::CustomToolCallOutput {
+                call_id, output, ..
+            } => Some(json!({
                 "role": "tool",
                 "tool_call_id": call_id,
                 "content": output.body.to_text().unwrap_or_default(),
             })),
-            ResponseItem::Reasoning { .. }
+            ResponseItem::AgentMessage { .. }
+            | ResponseItem::Reasoning { .. }
+            | ResponseItem::ToolSearchCall { .. }
+            | ResponseItem::ToolSearchOutput { .. }
             | ResponseItem::WebSearchCall { .. }
             | ResponseItem::ImageGenerationCall { .. }
-            | ResponseItem::GhostSnapshot { .. }
             | ResponseItem::Compaction { .. }
+            | ResponseItem::CompactionTrigger
+            | ResponseItem::ContextCompaction { .. }
             | ResponseItem::Other => None,
         };
         if let Some(message) = translated {
@@ -321,7 +336,7 @@ fn translate_content_items_to_chat_content(content: &[ContentItem]) -> Value {
                     "type": "text",
                     "text": text,
                 }),
-                ContentItem::InputImage { image_url } => json!({
+                ContentItem::InputImage { image_url, .. } => json!({
                     "type": "image_url",
                     "image_url": { "url": image_url },
                 }),
@@ -515,6 +530,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             text: None,
+            client_metadata: None,
         };
 
         let body = translate_responses_request_to_chat_body(request).expect("request translates");
@@ -544,6 +560,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             text: None,
+            client_metadata: None,
         };
 
         let body = translate_responses_request_to_chat_body(request).expect("request translates");
@@ -563,7 +580,6 @@ mod tests {
                 content: vec![ContentItem::InputText {
                     text: "Stay terse.".to_string(),
                 }],
-                end_turn: None,
                 phase: None,
             }],
             tools: Vec::new(),
@@ -576,6 +592,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             text: None,
+            client_metadata: None,
         };
 
         let body = translate_responses_request_to_chat_body(request).expect("request translates");
@@ -597,7 +614,6 @@ mod tests {
                     content: vec![ContentItem::InputText {
                         text: "Stay terse.".to_string(),
                     }],
-                    end_turn: None,
                     phase: None,
                 },
                 ResponseItem::Message {
@@ -606,7 +622,6 @@ mod tests {
                     content: vec![ContentItem::InputText {
                         text: "Follow repo rules.".to_string(),
                     }],
-                    end_turn: None,
                     phase: None,
                 },
                 ResponseItem::Message {
@@ -615,7 +630,6 @@ mod tests {
                     content: vec![ContentItem::InputText {
                         text: "hello".to_string(),
                     }],
-                    end_turn: None,
                     phase: None,
                 },
             ],
@@ -629,6 +643,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             text: None,
+            client_metadata: None,
         };
 
         let body = translate_responses_request_to_chat_body(request).expect("request translates");
@@ -663,6 +678,7 @@ mod tests {
             service_tier: Some("priority".to_string()),
             prompt_cache_key: None,
             text: None,
+            client_metadata: None,
         };
 
         let body = translate_responses_request_to_chat_body(request).expect("request translates");
@@ -681,18 +697,19 @@ mod tests {
                     content: vec![ContentItem::InputText {
                         text: "commit these changes".to_string(),
                     }],
-                    end_turn: None,
                     phase: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
                     name: "list_dir".to_string(),
+                    namespace: None,
                     arguments: "{\"dir_path\":\"/repo\"}".to_string(),
                     call_id: "call_1".to_string(),
                 },
                 ResponseItem::FunctionCall {
                     id: None,
                     name: "exec_command".to_string(),
+                    namespace: None,
                     arguments: "{\"cmd\":\"git status --short\"}".to_string(),
                     call_id: "call_2".to_string(),
                 },
@@ -715,6 +732,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             text: None,
+            client_metadata: None,
         };
 
         let body = translate_responses_request_to_chat_body(request).expect("request translates");

@@ -1,23 +1,151 @@
 use assert_cmd::Command as AssertCommand;
-use codex_core::auth::CODEX_API_KEY_ENV_VAR;
+use codex_git_utils::collect_git_info;
+use codex_login::CODEX_ACCESS_TOKEN_ENV_VAR;
+use codex_login::CODEX_API_KEY_ENV_VAR;
 use codex_protocol::protocol::GitInfo;
-use codex_utils_cargo_bin::find_resource;
 use core_test_support::fs_wait;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
+use pretty_assertions::assert_eq;
 use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
+use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::header;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
+
+const PERSONAL_ACCESS_TOKEN: &str = "at-cli-test";
+const PERSONAL_ACCESS_TOKEN_AUTHORIZATION: &str = "Bearer at-cli-test";
+const PERSONAL_ACCESS_TOKEN_ACCOUNT_ID: &str = "account-pat";
+const WHOAMI_PATH: &str = "/v1/user-auth-credential/whoami";
+const CLOUD_CONFIG_BUNDLE_PATH: &str = "/backend-api/wham/config/bundle";
 
 fn repo_root() -> std::path::PathBuf {
     #[expect(clippy::expect_used)]
     codex_utils_cargo_bin::repo_root().expect("failed to resolve repo root")
 }
 
-fn cli_responses_fixture() -> std::path::PathBuf {
-    #[expect(clippy::expect_used)]
-    find_resource!("tests/cli_responses_fixture.sse").expect("failed to resolve fixture path")
+fn cli_sse_response() -> String {
+    responses::sse(vec![
+        responses::ev_response_created("resp-fixture"),
+        responses::ev_assistant_message("msg-fixture", "fixture hello"),
+        responses::ev_completed("resp-fixture"),
+    ])
+}
+
+async fn mount_personal_access_token_startup(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path(WHOAMI_PATH))
+        .and(header("authorization", PERSONAL_ACCESS_TOKEN_AUTHORIZATION))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "email": "user@example.com",
+            "chatgpt_user_id": "user-pat",
+            "chatgpt_account_id": PERSONAL_ACCESS_TOKEN_ACCOUNT_ID,
+            "chatgpt_plan_type": "enterprise",
+            "chatgpt_account_is_fedramp": true,
+        })))
+        .expect(1..)
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(CLOUD_CONFIG_BUNDLE_PATH))
+        .and(header("authorization", PERSONAL_ACCESS_TOKEN_AUTHORIZATION))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+#[expect(clippy::unwrap_used)]
+fn personal_access_token_exec_command(server: &MockServer, home: &TempDir) -> AssertCommand {
+    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let mut cmd = AssertCommand::new(bin);
+    cmd.timeout(Duration::from_secs(30));
+    cmd.arg("exec")
+        .arg("--skip-git-repo-check")
+        .arg("-c")
+        .arg(format!("openai_base_url=\"{}/api/codex\"", server.uri()))
+        .arg("-c")
+        .arg(format!("chatgpt_base_url=\"{}/backend-api\"", server.uri()))
+        .arg("-C")
+        .arg(repo_root())
+        .arg("hello?");
+    cmd.env("CODEX_HOME", home.path())
+        .env(CODEX_ACCESS_TOKEN_ENV_VAR, PERSONAL_ACCESS_TOKEN)
+        .env("CODEX_AUTHAPI_BASE_URL", server.uri())
+        .env_remove(CODEX_API_KEY_ENV_VAR)
+        .env_remove("OPENAI_API_KEY");
+    cmd
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_mode_stream_cli_supports_personal_access_tokens() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    mount_personal_access_token_startup(&server).await;
+    let resp_mock = responses::mount_sse_once(&server, cli_sse_response()).await;
+    let home = TempDir::new().unwrap();
+
+    let output = personal_access_token_exec_command(&server, &home)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "codex-cli exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = resp_mock.single_request();
+    assert_eq!(request.path(), "/api/codex/responses");
+    assert_eq!(
+        request.header("authorization").as_deref(),
+        Some("Bearer at-cli-test")
+    );
+    assert_eq!(
+        request.header("chatgpt-account-id").as_deref(),
+        Some(PERSONAL_ACCESS_TOKEN_ACCOUNT_ID)
+    );
+    assert_eq!(request.header("x-openai-fedramp").as_deref(), Some("true"));
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_mode_stream_cli_does_not_attempt_oauth_refresh_for_personal_access_tokens_after_401()
+ {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    mount_personal_access_token_startup(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/codex/responses"))
+        .and(header("authorization", PERSONAL_ACCESS_TOKEN_AUTHORIZATION))
+        .and(header(
+            "chatgpt-account-id",
+            PERSONAL_ACCESS_TOKEN_ACCOUNT_ID,
+        ))
+        .and(header("x-openai-fedramp", "true"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+        .expect(1..)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let home = TempDir::new().unwrap();
+
+    let output = personal_access_token_exec_command(&server, &home)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    server.verify().await;
 }
 
 /// Tests streaming the Responses API through the CLI using a mock server.
@@ -52,8 +180,7 @@ async fn responses_mode_stream_cli() {
         .arg(&repo_root)
         .arg("hello?");
     cmd.env("CODEX_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy")
-        .env("OPENAI_BASE_URL", format!("{}/v1", server.uri()));
+        .env("OPENAI_API_KEY", "dummy");
 
     let output = cmd.output().unwrap();
     println!("Status: {}", output.status);
@@ -66,27 +193,41 @@ async fn responses_mode_stream_cli() {
 
     let request = resp_mock.single_request();
     assert_eq!(request.path(), "/v1/responses");
+}
 
-    // TODO(jif) fix
-    // // Verify a new session rollout was created and is discoverable via list_conversations
-    // let provider_filter = vec!["mock".to_string()];
-    // let page = RolloutRecorder::list_threads(
-    //     home.path(),
-    //     10,
-    //     None,
-    //     codex_core::ThreadSortKey::UpdatedAt,
-    //     &[],
-    //     Some(provider_filter.as_slice()),
-    //     "mock",
-    // )
-    // .await
-    // .expect("list conversations");
-    // assert!(
-    //     !page.items.is_empty(),
-    //     "expected at least one session to be listed"
-    // );
-    // assert!(page.items[0].thread_id.is_some(), "missing thread_id");
-    // assert!(page.items[0].created_at.is_some(), "missing created_at");
+/// Ensures `openai_base_url` config override routes built-in openai provider requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_mode_stream_cli_supports_openai_base_url_config_override() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let repo_root = repo_root();
+    let sse = responses::sse(vec![
+        responses::ev_response_created("resp-1"),
+        responses::ev_assistant_message("msg-1", "hi"),
+        responses::ev_completed("resp-1"),
+    ]);
+    let resp_mock = responses::mount_sse_once(&server, sse).await;
+
+    let home = TempDir::new().unwrap();
+    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let mut cmd = AssertCommand::new(bin);
+    cmd.timeout(Duration::from_secs(30));
+    cmd.arg("exec")
+        .arg("--skip-git-repo-check")
+        .arg("-c")
+        .arg(format!("openai_base_url=\"{}/v1\"", server.uri()))
+        .arg("-C")
+        .arg(&repo_root)
+        .arg("hello?");
+    cmd.env("CODEX_HOME", home.path())
+        .env("OPENAI_API_KEY", "dummy");
+
+    let output = cmd.output().unwrap();
+    assert!(output.status.success());
+
+    let request = resp_mock.single_request();
+    assert_eq!(request.path(), "/v1/responses");
 }
 
 /// Verify that passing `-c model_instructions_file=...` to the CLI
@@ -136,8 +277,7 @@ async fn exec_cli_applies_model_instructions_file() {
         .arg(&repo_root)
         .arg("hello?\n");
     cmd.env("CODEX_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy")
-        .env("OPENAI_BASE_URL", format!("{}/v1", server.uri()));
+        .env("OPENAI_API_KEY", "dummy");
 
     let output = cmd.output().unwrap();
     println!("Status: {}", output.status);
@@ -160,36 +300,104 @@ async fn exec_cli_applies_model_instructions_file() {
     );
 }
 
-/// Tests streaming responses through the CLI using a local SSE fixture file.
-/// This test:
-/// 1. Uses a pre-recorded SSE response fixture instead of a live server
-/// 2. Configures codex to read from this fixture via CODEX_RS_SSE_FIXTURE env var
-/// 3. Sends a "hello?" prompt and verifies the response
-/// 4. Ensures the fixture content is correctly streamed through the CLI
+/// Verify that `codex exec --profile ...` preserves the active user config
+/// profile when it starts the in-process app-server thread, so the selected
+/// profile's `model_instructions_file` reaches the outbound request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_cli_profile_applies_model_instructions_file() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n"
+    );
+    let resp_mock = core_test_support::responses::mount_sse_once(&server, sse.to_string()).await;
+
+    let custom = TempDir::new().unwrap();
+    let marker = "cli-profile-model-instructions-file-marker";
+    let custom_path = custom.path().join("instr.md");
+    std::fs::write(&custom_path, marker).unwrap();
+    let custom_path_str = custom_path.to_string_lossy().replace('\\', "/");
+
+    let provider_override = format!(
+        "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"PATH\", wire_api = \"responses\" }}",
+        server.uri()
+    );
+
+    let home = TempDir::new().unwrap();
+    std::fs::write(
+        home.path().join("default.config.toml"),
+        format!("model_instructions_file = \"{custom_path_str}\"\n"),
+    )
+    .unwrap();
+
+    let repo_root = repo_root();
+    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let mut cmd = AssertCommand::new(bin);
+    cmd.arg("exec")
+        .arg("--skip-git-repo-check")
+        .arg("--profile")
+        .arg("default")
+        .arg("-c")
+        .arg(&provider_override)
+        .arg("-c")
+        .arg("model_provider=\"mock\"")
+        .arg("-C")
+        .arg(&repo_root)
+        .arg("hello?\n");
+    cmd.env("CODEX_HOME", home.path())
+        .env("OPENAI_API_KEY", "dummy");
+
+    let output = cmd.output().unwrap();
+    println!("Status: {}", output.status);
+    println!("Stdout:\n{}", String::from_utf8_lossy(&output.stdout));
+    println!("Stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success());
+
+    let request = resp_mock.single_request();
+    let body = request.body_json();
+    let instructions = body
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        instructions.contains(marker),
+        "instructions did not contain profile marker; got: {instructions}"
+    );
+}
+
+/// Tests streaming responses through the CLI using a local Responses API server.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_api_stream_cli() {
     skip_if_no_network!();
 
-    let fixture = cli_responses_fixture();
+    let server = MockServer::start().await;
+    let resp_mock = responses::mount_sse_once(&server, cli_sse_response()).await;
     let repo_root = repo_root();
 
     let home = TempDir::new().unwrap();
     let bin = codex_utils_cargo_bin::cargo_bin("rolodex").unwrap();
     let mut cmd = AssertCommand::new(bin);
+    cmd.timeout(Duration::from_secs(30));
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
+        .arg("-c")
+        .arg(format!("openai_base_url=\"{}/v1\"", server.uri()))
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?");
     cmd.env("CODEX_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy")
-        .env("CODEX_RS_SSE_FIXTURE", fixture)
-        .env("OPENAI_BASE_URL", "http://unused.local");
+        .env("OPENAI_API_KEY", "dummy");
 
     let output = cmd.output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("fixture hello"));
+
+    let request = resp_mock.single_request();
+    assert_eq!(request.path(), "/v1/responses");
 }
 
 /// End-to-end: create a session (writes rollout), verify the file, then resume and confirm append.
@@ -205,23 +413,25 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     let marker = format!("integration-test-{}", Uuid::new_v4());
     let prompt = format!("echo {marker}");
 
-    // 3. Use the same offline SSE fixture as responses_api_stream_cli so the test is hermetic.
-    let fixture = cli_responses_fixture();
+    // 3. Serve two hermetic SSE responses, one for the initial run and one for resume.
+    let server = MockServer::start().await;
+    let resp_mock =
+        responses::mount_sse_sequence(&server, vec![cli_sse_response(), cli_sse_response()]).await;
     let repo_root = repo_root();
 
     // 4. Run the codex CLI and invoke `exec`, which is what records a session.
     let bin = codex_utils_cargo_bin::cargo_bin("rolodex").unwrap();
     let mut cmd = AssertCommand::new(bin);
+    cmd.timeout(Duration::from_secs(30));
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
+        .arg("-c")
+        .arg(format!("openai_base_url=\"{}/v1\"", server.uri()))
         .arg("-C")
         .arg(&repo_root)
         .arg(&prompt);
     cmd.env("CODEX_HOME", home.path())
-        .env(CODEX_API_KEY_ENV_VAR, "dummy")
-        .env("CODEX_RS_SSE_FIXTURE", &fixture)
-        // Required for CLI arg parsing even though fixture short-circuits network usage.
-        .env("OPENAI_BASE_URL", "http://unused.local");
+        .env(CODEX_API_KEY_ENV_VAR, "dummy");
 
     let output = cmd.output().unwrap();
     assert!(
@@ -333,20 +543,22 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     let prompt2 = format!("echo {marker2}");
     let bin2 = codex_utils_cargo_bin::cargo_bin("rolodex").unwrap();
     let mut cmd2 = AssertCommand::new(bin2);
+    cmd2.timeout(Duration::from_secs(30));
     cmd2.arg("exec")
         .arg("--skip-git-repo-check")
+        .arg("-c")
+        .arg(format!("openai_base_url=\"{}/v1\"", server.uri()))
         .arg("-C")
         .arg(&repo_root)
         .arg(&prompt2)
         .arg("resume")
         .arg("--last");
     cmd2.env("CODEX_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy")
-        .env("CODEX_RS_SSE_FIXTURE", &fixture)
-        .env("OPENAI_BASE_URL", "http://unused.local");
+        .env("OPENAI_API_KEY", "dummy");
 
     let output2 = cmd2.output().unwrap();
     assert!(output2.status.success(), "resume codex-cli run failed");
+    assert_eq!(resp_mock.requests().len(), 2);
 
     // Find the new session file containing the resumed marker.
     let marker2_clone = marker2.clone();
@@ -458,7 +670,7 @@ async fn integration_git_info_unit_test() {
         .unwrap();
 
     // 3. Test git info collection directly
-    let git_info = codex_core::git_info::collect_git_info(&git_repo).await;
+    let git_info = collect_git_info(&git_repo).await;
 
     // 4. Verify git info is present and contains expected data
     assert!(git_info.is_some(), "Git info should be collected");
@@ -470,7 +682,7 @@ async fn integration_git_info_unit_test() {
         git_info.commit_hash.is_some(),
         "Git info should contain commit_hash"
     );
-    let commit_hash = git_info.commit_hash.as_ref().unwrap();
+    let commit_hash = &git_info.commit_hash.as_ref().unwrap().0;
     assert_eq!(commit_hash.len(), 40, "Commit hash should be 40 characters");
     assert!(
         commit_hash.chars().all(|c| c.is_ascii_hexdigit()),

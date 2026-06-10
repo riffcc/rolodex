@@ -1,7 +1,7 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use app_test_support::McpProcess;
+use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
 use codex_app_server_protocol::ItemCompletedNotification;
@@ -18,8 +18,8 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
-use codex_core::features::FEATURES;
-use codex_core::features::Feature;
+use codex_features::FEATURES;
+use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -53,13 +53,13 @@ async fn plan_mode_uses_proposed_plan_block_for_plan_item() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let turn = start_plan_mode_turn(&mut mcp).await?;
     let (_, completed_items, plan_deltas, turn_completed) =
         collect_turn_notifications(&mut mcp).await?;
-    wait_for_responses_request_count(&server, 1).await?;
+    wait_for_responses_request_count(&server, /*expected_count*/ 1).await?;
 
     assert_eq!(turn_completed.turn.id, turn.id);
     assert_eq!(turn_completed.turn.status, TurnStatus::Completed);
@@ -111,12 +111,12 @@ async fn plan_mode_without_proposed_plan_does_not_emit_plan_item() -> Result<()>
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let _turn = start_plan_mode_turn(&mut mcp).await?;
     let (_, completed_items, plan_deltas, _) = collect_turn_notifications(&mut mcp).await?;
-    wait_for_responses_request_count(&server, 1).await?;
+    wait_for_responses_request_count(&server, /*expected_count*/ 1).await?;
 
     let has_plan_item = completed_items
         .iter()
@@ -127,7 +127,7 @@ async fn plan_mode_without_proposed_plan_does_not_emit_plan_item() -> Result<()>
     Ok(())
 }
 
-async fn start_plan_mode_turn(mcp: &mut McpProcess) -> Result<codex_app_server_protocol::Turn> {
+async fn start_plan_mode_turn(mcp: &mut TestAppServer) -> Result<codex_app_server_protocol::Turn> {
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
             model: Some("mock-model".to_string()),
@@ -152,6 +152,7 @@ async fn start_plan_mode_turn(mcp: &mut McpProcess) -> Result<codex_app_server_p
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
             thread_id: thread.id,
+            client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: "Plan this".to_string(),
                 text_elements: Vec::new(),
@@ -169,7 +170,7 @@ async fn start_plan_mode_turn(mcp: &mut McpProcess) -> Result<codex_app_server_p
 }
 
 async fn collect_turn_notifications(
-    mcp: &mut McpProcess,
+    mcp: &mut TestAppServer,
 ) -> Result<(
     Vec<ThreadItem>,
     Vec<ThreadItem>,

@@ -435,7 +435,7 @@ impl ProjectNavigationState {
             {
                 workspace.tabs.remove(idx);
                 workspace.active_tab = match workspace.active_tab {
-                    Some(active_idx) if workspace.tabs.is_empty() => None,
+                    Some(_active_idx) if workspace.tabs.is_empty() => None,
                     Some(active_idx) if active_idx > idx => Some(active_idx - 1),
                     Some(active_idx) if active_idx >= workspace.tabs.len() => {
                         Some(workspace.tabs.len().saturating_sub(1))

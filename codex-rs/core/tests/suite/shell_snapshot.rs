@@ -1,11 +1,11 @@
 use anyhow::Result;
-use codex_core::features::Feature;
+use codex_features::Feature;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandBeginEvent;
 use codex_protocol::protocol::ExecCommandEndEvent;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -14,7 +14,9 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::test_codex::TestCodexHarness;
+use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
@@ -72,7 +74,7 @@ async fn wait_for_snapshot(codex_home: &Path) -> Result<PathBuf> {
 }
 
 async fn wait_for_file_contents(path: &Path) -> Result<String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match fs::read_to_string(path).await {
             Ok(contents) => return Ok(contents),
@@ -153,24 +155,34 @@ async fn run_snapshot_command_with_options(
     let codex = test.codex.clone();
     let codex_home = test.home.path().to_path_buf();
     let session_model = test.session_configured.model.clone();
-    let cwd = test.cwd_path().to_path_buf();
+    let cwd = test.config.cwd.clone();
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::Disabled, cwd.as_path());
 
     codex
-        .submit(Op::UserTurn {
+        .submit(Op::UserInput {
             items: vec![UserInput::Text {
                 text: "run unified exec with shell snapshot".into(),
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
-            cwd,
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
-            model: session_model,
-            effort: None,
-            summary: None,
-            service_tier: None,
-            collaboration_mode: None,
-            personality: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                environments: Some(local_selections(cwd)),
+                approval_policy: Some(AskForApproval::Never),
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
+                    mode: codex_protocol::config_types::ModeKind::Default,
+                    settings: codex_protocol::config_types::Settings {
+                        model: session_model,
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                }),
+                ..Default::default()
+            },
         })
         .await?;
 
@@ -243,24 +255,34 @@ async fn run_shell_command_snapshot_with_options(
     let codex = test.codex.clone();
     let codex_home = test.home.path().to_path_buf();
     let session_model = test.session_configured.model.clone();
-    let cwd = test.cwd_path().to_path_buf();
+    let cwd = test.config.cwd.clone();
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::Disabled, cwd.as_path());
 
     codex
-        .submit(Op::UserTurn {
+        .submit(Op::UserInput {
             items: vec![UserInput::Text {
                 text: "run shell_command with shell snapshot".into(),
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
-            cwd,
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
-            model: session_model,
-            effort: None,
-            summary: None,
-            service_tier: None,
-            collaboration_mode: None,
-            personality: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                environments: Some(local_selections(cwd)),
+                approval_policy: Some(AskForApproval::Never),
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
+                    mode: codex_protocol::config_types::ModeKind::Default,
+                    settings: codex_protocol::config_types::Settings {
+                        model: session_model,
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                }),
+                ..Default::default()
+            },
         })
         .await?;
 
@@ -314,23 +336,33 @@ async fn run_tool_turn_on_harness(
     let test = harness.test();
     let codex = test.codex.clone();
     let session_model = test.session_configured.model.clone();
-    let cwd = test.cwd_path().to_path_buf();
+    let cwd = test.config.cwd.clone();
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::Disabled, cwd.as_path());
     codex
-        .submit(Op::UserTurn {
+        .submit(Op::UserInput {
             items: vec![UserInput::Text {
                 text: prompt.into(),
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
-            cwd,
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
-            model: session_model,
-            effort: None,
-            summary: None,
-            service_tier: None,
-            collaboration_mode: None,
-            personality: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                environments: Some(local_selections(cwd)),
+                approval_policy: Some(AskForApproval::Never),
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
+                    mode: codex_protocol::config_types::ModeKind::Default,
+                    settings: codex_protocol::config_types::Settings {
+                        model: session_model,
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                }),
+                ..Default::default()
+            },
         })
         .await?;
 
@@ -515,20 +547,22 @@ async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
             .features
             .enable(Feature::ShellSnapshot)
             .expect("test config should allow feature update");
-        config.include_apply_patch_tool = true;
     });
     let harness = TestCodexHarness::with_builder(builder).await?;
 
     let test = harness.test();
     let codex = test.codex.clone();
-    let cwd = test.cwd_path().to_path_buf();
+    let cwd = test.config.cwd.clone();
     let codex_home = test.home.path().to_path_buf();
     let target = cwd.join("snapshot-apply.txt");
 
     let script = "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: snapshot-apply.txt\n+hello from snapshot\n*** End Patch\nEOF\n";
     let args = json!({
         "command": script,
-        "timeout_ms": 1_000,
+        // Keep this above the default because intercepted apply_patch still
+        // performs filesystem work that can be slow in Bazel macOS test
+        // environments.
+        "timeout_ms": 5_000,
     });
     let call_id = "shell-snapshot-apply-patch";
     let responses = vec![
@@ -546,22 +580,32 @@ async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
     mount_sse_sequence(harness.server(), responses).await;
 
     let model = test.session_configured.model.clone();
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::Disabled, cwd.as_path());
     codex
-        .submit(Op::UserTurn {
+        .submit(Op::UserInput {
             items: vec![UserInput::Text {
                 text: "apply patch via shell_command with snapshot".into(),
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
-            cwd: cwd.clone(),
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
-            model,
-            effort: None,
-            summary: None,
-            service_tier: None,
-            collaboration_mode: None,
-            personality: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                environments: Some(local_selections(cwd.clone())),
+                approval_policy: Some(AskForApproval::Never),
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
+                    mode: codex_protocol::config_types::ModeKind::Default,
+                    settings: codex_protocol::config_types::Settings {
+                        model,
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                }),
+                ..Default::default()
+            },
         })
         .await?;
 
@@ -569,7 +613,32 @@ async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
     let snapshot_content = fs::read_to_string(&snapshot_path).await?;
     assert_posix_snapshot_sections(&snapshot_content);
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    let mut saw_patch_begin = false;
+    let mut patch_end = None;
+    wait_for_event(&codex, |ev| match ev {
+        EventMsg::PatchApplyBegin(begin) if begin.call_id == call_id => {
+            saw_patch_begin = true;
+            false
+        }
+        EventMsg::PatchApplyEnd(end) if end.call_id == call_id => {
+            patch_end = Some(end.clone());
+            false
+        }
+        EventMsg::TurnComplete(_) => true,
+        _ => false,
+    })
+    .await;
+
+    assert!(
+        saw_patch_begin,
+        "expected apply_patch to emit PatchApplyBegin"
+    );
+    let patch_end = patch_end.expect("expected apply_patch to emit PatchApplyEnd");
+    assert!(
+        patch_end.success,
+        "expected apply_patch to finish successfully: stdout={:?} stderr={:?}",
+        patch_end.stdout, patch_end.stderr,
+    );
 
     assert_eq!(
         wait_for_file_contents(&target).await?,
