@@ -18,9 +18,12 @@ use crate::tools::handlers::ReadMcpResourceHandler;
 use crate::tools::handlers::RequestPermissionsHandler;
 use crate::tools::handlers::RequestPluginInstallHandler;
 use crate::tools::handlers::RequestUserInputHandler;
+use crate::tools::handlers::SearchHandler;
 use crate::tools::handlers::ShellCommandHandler;
 use crate::tools::handlers::ShellCommandHandlerOptions;
 use crate::tools::handlers::SmartReadHandler;
+use crate::tools::handlers::SmartSearchHandler;
+use crate::tools::handlers::SmartWriteHandler;
 use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandler;
 use crate::tools::handlers::ViewImageHandler;
@@ -44,7 +47,10 @@ use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHand
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
+use crate::tools::handlers::search_spec::SearchToolOptions;
 use crate::tools::handlers::smart_read_spec::SmartReadToolOptions;
+use crate::tools::handlers::smart_search_spec::SmartSearchToolOptions;
+use crate::tools::handlers::smart_write_spec::SmartWriteToolOptions;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_image_generation_tool;
@@ -686,7 +692,16 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
 
     if environment_mode.has_environment() {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
+        planned_tools.add(SearchHandler::new(SearchToolOptions {
+            include_environment_id,
+        }));
         planned_tools.add(SmartReadHandler::new(SmartReadToolOptions {
+            include_environment_id,
+        }));
+        planned_tools.add(SmartSearchHandler::new(SmartSearchToolOptions {
+            include_environment_id,
+        }));
+        planned_tools.add(SmartWriteHandler::new(SmartWriteToolOptions {
             include_environment_id,
         }));
         planned_tools.add(ViewImageHandler::new(ViewImageToolOptions {

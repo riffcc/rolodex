@@ -8901,6 +8901,7 @@ dependencies = [
  "async-trait",
  "futures",
  "glob",
+ "minirust-search",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -9197,6 +9198,16 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "minirust-search"
+version = "0.1.0"
+source = "git+https://github.com/riffcc/minirust-search.git?rev=1edaaca3102366bfd9daf4ba4d754353d3c09914#1edaaca3102366bfd9daf4ba4d754353d3c09914"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "miniz_oxide"
