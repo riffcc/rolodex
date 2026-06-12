@@ -100,7 +100,14 @@ impl App {
                 );
                 None
             }
-            GamepadAction::PushToTalkStart | GamepadAction::PushToTalkStop => None,
+            GamepadAction::PushToTalkStart => {
+                self.handle_handy_push_to_talk(/*pressed*/ true);
+                None
+            }
+            GamepadAction::PushToTalkStop => {
+                self.handle_handy_push_to_talk(/*pressed*/ false);
+                None
+            }
             GamepadAction::SplitPaneFocusPrevious => {
                 let _ = self.focus_split_pane(tui, app_server, false).await;
                 None
@@ -122,6 +129,157 @@ impl App {
             self.handle_key_event(tui, app_server, KeyEvent::from(code))
                 .await;
         }
+    }
+
+    fn handle_handy_push_to_talk(&mut self, pressed: bool) {
+        #[cfg(feature = "voice-input")]
+        {
+            const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(350);
+            let now = Instant::now();
+
+            if pressed {
+                let is_double_tap = self
+                    .handy_gamepad
+                    .last_release_at
+                    .is_some_and(|last| now.saturating_duration_since(last) <= DOUBLE_TAP_WINDOW);
+
+                if is_double_tap {
+                    self.handy_gamepad.last_release_at = None;
+                    self.toggle_handy_continuous_mode();
+                    return;
+                }
+
+                if !self.handy_gamepad.continuous_mode {
+                    self.start_handy_recording();
+                }
+                return;
+            }
+
+            self.handy_gamepad.last_release_at = Some(now);
+            if !self.handy_gamepad.continuous_mode {
+                self.stop_handy_recording();
+            }
+        }
+
+        #[cfg(not(feature = "voice-input"))]
+        {
+            let _ = pressed;
+        }
+    }
+
+    #[cfg(feature = "voice-input")]
+    fn toggle_handy_continuous_mode(&mut self) {
+        self.handy_gamepad.continuous_mode = !self.handy_gamepad.continuous_mode;
+        if self.handy_gamepad.continuous_mode {
+            Self::play_handy_chime();
+            self.start_handy_recording();
+        } else {
+            self.stop_handy_recording();
+        }
+    }
+
+    #[cfg(feature = "voice-input")]
+    fn start_handy_recording(&mut self) {
+        if self.handy_gamepad.voice.is_some() {
+            return;
+        }
+
+        match crate::voice::VoiceCapture::start() {
+            Ok(voice) => {
+                Self::play_handy_chime();
+                let placeholder_id = self.chat_widget.insert_recording_meter_placeholder("⠤⠤⠤⠤");
+                self.spawn_handy_recording_meter(
+                    placeholder_id.clone(),
+                    voice.last_peak_arc(),
+                    voice.stopped_flag(),
+                );
+                self.handy_gamepad.voice = Some(voice);
+                self.handy_gamepad.placeholder_id = Some(placeholder_id);
+            }
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to start Handy voice capture: {err}"));
+            }
+        }
+    }
+
+    #[cfg(feature = "voice-input")]
+    fn stop_handy_recording(&mut self) {
+        let Some(voice) = self.handy_gamepad.voice.take() else {
+            return;
+        };
+
+        let placeholder_id = self
+            .handy_gamepad
+            .placeholder_id
+            .clone()
+            .unwrap_or_else(|| self.chat_widget.insert_recording_meter_placeholder("⠤⠤⠤⠤"));
+
+        match voice.stop() {
+            Ok(audio) => {
+                let total_samples = audio.data.len() as f32;
+                let samples_per_second = (audio.sample_rate as f32) * (audio.channels as f32);
+                let duration_seconds = if samples_per_second > 0.0 {
+                    total_samples / samples_per_second
+                } else {
+                    0.0
+                };
+                if duration_seconds < 0.25 {
+                    self.chat_widget
+                        .remove_recording_meter_placeholder(&placeholder_id);
+                    self.handy_gamepad.placeholder_id = None;
+                    return;
+                }
+
+                let prompt_source = self.chat_widget.composer_text_with_pending();
+                crate::voice::transcribe_async(
+                    placeholder_id,
+                    audio,
+                    Some(prompt_source),
+                    self.app_event_tx.clone(),
+                );
+            }
+            Err(err) => {
+                self.chat_widget
+                    .remove_recording_meter_placeholder(&placeholder_id);
+                self.handy_gamepad.placeholder_id = None;
+                self.chat_widget
+                    .add_error_message(format!("Failed to stop Handy voice capture: {err}"));
+            }
+        }
+    }
+
+    #[cfg(feature = "voice-input")]
+    fn spawn_handy_recording_meter(
+        &self,
+        id: String,
+        last_peak: Arc<AtomicU16>,
+        stop: Arc<AtomicBool>,
+    ) {
+        let tx = self.app_event_tx.clone();
+        let task = move || {
+            let mut meter = crate::voice::RecordingMeterState::new();
+            while !stop.load(Ordering::Relaxed) {
+                tx.send(AppEvent::UpdateRecordingMeter {
+                    id: id.clone(),
+                    text: meter.next_text(last_peak.load(Ordering::Relaxed)),
+                });
+                thread::sleep(Duration::from_millis(100));
+            }
+        };
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(task);
+        } else {
+            thread::spawn(task);
+        }
+    }
+
+    #[cfg(feature = "voice-input")]
+    fn play_handy_chime() {
+        let mut stderr = std::io::stderr();
+        let _ = stderr.write_all(b"\x07");
+        let _ = stderr.flush();
     }
 
     pub(super) async fn launch_external_editor(&mut self, tui: &mut tui::Tui) {

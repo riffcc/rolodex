@@ -1987,7 +1987,43 @@ impl App {
                     ));
                 }
             },
-            #[cfg(not(target_os = "linux"))]
+            AppEvent::TranscriptionComplete { id, text } => {
+                self.chat_widget.remove_recording_meter_placeholder(&id);
+                #[cfg(feature = "voice-input")]
+                if self.handy_gamepad.placeholder_id.as_deref() == Some(id.as_str()) {
+                    self.handy_gamepad.placeholder_id = None;
+                }
+
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    let mut composer = self.chat_widget.composer_text_with_pending();
+                    if !composer.is_empty()
+                        && !composer.chars().last().is_some_and(char::is_whitespace)
+                    {
+                        composer.push(' ');
+                    }
+                    composer.push_str(trimmed);
+                    self.chat_widget.apply_external_edit(composer);
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::TranscriptionFailed { id, error } => {
+                self.chat_widget.remove_recording_meter_placeholder(&id);
+                #[cfg(feature = "voice-input")]
+                if self.handy_gamepad.placeholder_id.as_deref() == Some(id.as_str()) {
+                    self.handy_gamepad.placeholder_id = None;
+                }
+
+                let message = if error.trim().is_empty() {
+                    "Voice transcription failed.".to_string()
+                } else {
+                    format!("Voice transcription failed: {error}")
+                };
+                tracing::error!("{message}");
+                self.chat_widget
+                    .add_to_history(history_cell::new_warning_event(message));
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::UpdateRecordingMeter { id, text } => {
                 // Update in place to preserve the element id for subsequent frames.
                 let updated = self.chat_widget.update_recording_meter_in_place(&id, &text);

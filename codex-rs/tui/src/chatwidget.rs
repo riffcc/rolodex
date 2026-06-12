@@ -1970,8 +1970,13 @@ impl ChatWidget {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 impl ChatWidget {
+    pub(crate) fn insert_recording_meter_placeholder(&mut self, text: &str) -> String {
+        let id = self.bottom_pane.insert_recording_meter_placeholder(text);
+        self.request_redraw();
+        id
+    }
+
     pub(crate) fn update_recording_meter_in_place(&mut self, id: &str, text: &str) -> bool {
         let updated = self.bottom_pane.update_recording_meter_in_place(id, text);
         if updated {

@@ -186,6 +186,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+#[cfg(feature = "voice-input")]
+use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
@@ -572,6 +574,17 @@ pub(crate) struct App {
     // Serialize hook enablement writes per hook so stale completions cannot
     // persist an older toggle after a newer one.
     pending_hook_enabled_writes: HashMap<String, Option<bool>>,
+    #[cfg(feature = "voice-input")]
+    handy_gamepad: HandyGamepadState,
+}
+
+#[cfg(feature = "voice-input")]
+#[derive(Default)]
+struct HandyGamepadState {
+    continuous_mode: bool,
+    voice: Option<crate::voice::VoiceCapture>,
+    placeholder_id: Option<String>,
+    last_release_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1059,6 +1072,8 @@ See the Codex keymap documentation for supported actions and examples."
             pending_startup_thread_start,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
+            #[cfg(feature = "voice-input")]
+            handy_gamepad: HandyGamepadState::default(),
         };
         if let Some(entry) = startup_hooks_browser {
             app.chat_widget.open_hooks_browser(entry);

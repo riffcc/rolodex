@@ -95,9 +95,9 @@ mod app_server_approval_conversions;
 mod app_server_session;
 mod approval_events;
 mod ascii_animation;
-#[cfg(not(target_os = "linux"))]
+#[cfg(feature = "voice-input")]
 mod audio_device;
-#[cfg(target_os = "linux")]
+#[cfg(not(feature = "voice-input"))]
 #[allow(dead_code)]
 mod audio_device {
     use crate::app_event::RealtimeAudioDeviceKind;
@@ -207,13 +207,14 @@ mod update_prompt;
 mod update_versions;
 mod updates;
 mod version;
-#[cfg(not(target_os = "linux"))]
+#[cfg(feature = "voice-input")]
 mod voice;
 mod width;
 mod workspace_command;
-#[cfg(target_os = "linux")]
+#[cfg(not(feature = "voice-input"))]
 #[allow(dead_code)]
 mod voice {
+    use crate::app_event::AppEvent;
     use crate::app_event_sender::AppEventSender;
     use crate::legacy_core::config::Config;
     use codex_app_server_protocol::ThreadRealtimeAudioChunk;
@@ -222,6 +223,8 @@ mod voice {
     use std::sync::atomic::AtomicU16;
 
     pub struct VoiceCapture;
+
+    pub struct RecordedAudio;
 
     pub(crate) struct RecordingMeterState;
 
@@ -232,7 +235,9 @@ mod voice {
             Err("voice input is unavailable in this build".to_string())
         }
 
-        pub fn stop(self) {}
+        pub fn stop(self) -> Result<RecordedAudio, String> {
+            Err("voice input is unavailable in this build".to_string())
+        }
 
         pub fn stopped_flag(&self) -> Arc<AtomicBool> {
             Arc::new(AtomicBool::new(true))
@@ -266,6 +271,18 @@ mod voice {
         }
 
         pub(crate) fn clear(&self) {}
+    }
+
+    pub fn transcribe_async(
+        id: String,
+        _audio: RecordedAudio,
+        _context: Option<String>,
+        tx: AppEventSender,
+    ) {
+        tx.send(AppEvent::TranscriptionFailed {
+            id,
+            error: "voice input is unavailable in this build".to_string(),
+        });
     }
 }
 

@@ -74,17 +74,25 @@ impl ChatWidget {
         self.request_realtime_conversation_close(/*info_message*/ None);
     }
 
-    #[cfg(not(target_os = "linux"))]
     pub(crate) fn stop_realtime_conversation_for_deleted_meter(&mut self, id: &str) -> bool {
-        if self.realtime_conversation.is_live()
-            && self.realtime_conversation.meter_placeholder_id.as_deref() == Some(id)
+        #[cfg(target_os = "linux")]
         {
-            self.realtime_conversation.meter_placeholder_id = None;
-            self.stop_realtime_conversation_from_ui();
-            return true;
+            let _ = id;
+            false
         }
 
-        false
+        #[cfg(not(target_os = "linux"))]
+        {
+            if self.realtime_conversation.is_live()
+                && self.realtime_conversation.meter_placeholder_id.as_deref() == Some(id)
+            {
+                self.realtime_conversation.meter_placeholder_id = None;
+                self.stop_realtime_conversation_from_ui();
+                return true;
+            }
+
+            false
+        }
     }
 
     pub(super) fn start_realtime_conversation(&mut self) {
@@ -477,7 +485,7 @@ impl ChatWidget {
             flag.store(true, Ordering::Relaxed);
         }
         if let Some(capture) = self.realtime_conversation.capture.take() {
-            capture.stop();
+            let _ = capture.stop();
         }
         if let Some(id) = self.realtime_conversation.meter_placeholder_id.take() {
             self.remove_recording_meter_placeholder(&id);

@@ -968,10 +968,21 @@ pub(crate) enum AppEvent {
 
     /// Live update for the in-progress voice recording placeholder. Carries
     /// the placeholder `id` and the text to display (e.g., an ASCII meter).
-    #[cfg(not(target_os = "linux"))]
     UpdateRecordingMeter {
         id: String,
         text: String,
+    },
+
+    /// Voice transcription finished for the given placeholder id.
+    TranscriptionComplete {
+        id: String,
+        text: String,
+    },
+
+    /// Voice transcription failed; remove the placeholder identified by `id`.
+    TranscriptionFailed {
+        id: String,
+        error: String,
     },
 
     /// Open the branch picker option from the review popup.
