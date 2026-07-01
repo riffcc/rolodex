@@ -176,10 +176,6 @@ pub(crate) enum AppEvent {
         cwd: PathBuf,
         target: ProjectOpenTarget,
     },
-    ResumeProjectAtTarget {
-        cwd: PathBuf,
-        target: ProjectOpenTarget,
-    },
     ToggleFavoriteProject {
         cwd: PathBuf,
     },

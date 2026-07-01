@@ -519,6 +519,8 @@ pub enum GamepadAction {
     ProjectWorkspaceNext,
     ScrollTranscriptUp,
     ScrollTranscriptDown,
+    ScrollTranscriptLineUp,
+    ScrollTranscriptLineDown,
     PreviousPage,
     NextPage,
     FocusNext,

@@ -4,7 +4,7 @@ assertion_line: 7614
 expression: popup
 ---
 Open Project In RIGHT Tab
-Choose a favorite, or browse into a directory. Enter resumes; X starts fresh.
+Choose a favorite, or browse into a directory. Enter opens; X starts fresh.
 <ROOT>
 ╔Favorites═══════════════════════════╗┌Browser: <ROOT>──────────────────────┐
 ║> projects                          ║│  .. <TMP>                                   │
@@ -27,5 +27,5 @@ Choose a favorite, or browse into a directory. Enter resumes; X starts fresh.
 ║                                    ║│                                                  │
 ║                                    ║│                                                  │
 ╚════════════════════════════════════╝└──────────────────────────────────────────────────┘
-enter to resume project | x to open fresh
+enter to open project | x to open fresh
 right/l to browse directory | esc to cancel

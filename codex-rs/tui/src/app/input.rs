@@ -81,6 +81,8 @@ impl App {
             GamepadAction::NextPage | GamepadAction::ScrollTranscriptDown => {
                 Some(KeyCode::PageDown)
             }
+            GamepadAction::ScrollTranscriptLineUp => Some(KeyCode::Up),
+            GamepadAction::ScrollTranscriptLineDown => Some(KeyCode::Down),
             GamepadAction::FocusNext => Some(KeyCode::Tab),
             GamepadAction::ProjectNewTabLeft => {
                 self.open_project_chooser(

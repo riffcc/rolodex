@@ -33,10 +33,6 @@ impl App {
                 self.open_new_project_session_at_target(tui, app_server, cwd, target)
                     .await?;
             }
-            AppEvent::ResumeProjectAtTarget { cwd, target } => {
-                self.resume_project_at_target(tui, app_server, cwd, target)
-                    .await?;
-            }
             AppEvent::ToggleFavoriteProject { cwd } => {
                 self.toggle_project_favorite(cwd);
             }

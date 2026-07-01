@@ -580,14 +580,14 @@ impl GamepadState {
             scroll_up > 0.0,
             scroll_up,
             tx,
-            TuiEvent::Gamepad(GamepadAction::ScrollTranscriptUp),
+            TuiEvent::Gamepad(GamepadAction::ScrollTranscriptLineUp),
             now,
         );
         self.repeat_scroll_down.tick(
             scroll_down > 0.0,
             scroll_down,
             tx,
-            TuiEvent::Gamepad(GamepadAction::ScrollTranscriptDown),
+            TuiEvent::Gamepad(GamepadAction::ScrollTranscriptLineDown),
             now,
         );
     }
@@ -886,6 +886,23 @@ mod tests {
             Ok(TuiEvent::Gamepad(GamepadAction::SplitPaneCreateVertical))
         ));
         state.emit_repeats(&tx);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn right_stick_scrolls_transcript_by_line() {
+        let mut state = GamepadState {
+            right_y: 1.0,
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        state.emit_repeats(&tx);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TuiEvent::Gamepad(GamepadAction::ScrollTranscriptLineDown))
+        ));
         assert!(rx.try_recv().is_err());
     }
 }

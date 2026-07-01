@@ -1,9 +1,10 @@
 ---
 source: tui/src/bottom_pane/project_chooser.rs
+assertion_line: 584
 expression: "render_snapshot(&view, 80)"
 ---
 Open Project In New Horizontal Pane                                             
-Choose a favorite, or browse into a directory. Enter resumes; X starts fresh.   
+Choose a favorite, or browse into a directory. Enter opens; X starts fresh.     
 /workspace                                                                      
 ╔Favorites═══════════════════════╗┌Browser: /workspace─────────────────────────┐
 ║> ● codex                       ║│  .. /                                      │
@@ -34,5 +35,5 @@ Choose a favorite, or browse into a directory. Enter resumes; X starts fresh.
 ║                                ║│                                            │
 ║                                ║│                                            │
 ╚════════════════════════════════╝└────────────────────────────────────────────┘
-enter to resume project | x to open fresh                                       
+enter to open project | x to open fresh                                         
 right/l to browse directory | esc to cancel
