@@ -5,6 +5,8 @@ use chrono::Utc;
 #[cfg(test)]
 use codex_protocol::ThreadId;
 #[cfg(test)]
+use codex_protocol::openai_models::ReasoningEffort;
+#[cfg(test)]
 use codex_protocol::protocol::AskForApproval;
 #[cfg(test)]
 use codex_protocol::protocol::SandboxPolicy;
@@ -46,12 +48,17 @@ pub(super) fn test_thread_metadata(
         created_at: now,
         updated_at: now,
         source: "cli".to_string(),
+        thread_source: None,
         agent_nickname: None,
         agent_role: None,
+        agent_path: None,
         model_provider: "test-provider".to_string(),
+        model: Some("gpt-5".to_string()),
+        reasoning_effort: Some(ReasoningEffort::Medium),
         cwd,
         cli_version: "0.0.0".to_string(),
         title: String::new(),
+        preview: Some("hello".to_string()),
         sandbox_policy: crate::extract::enum_to_string(&SandboxPolicy::new_read_only_policy()),
         approval_mode: crate::extract::enum_to_string(&AskForApproval::OnRequest),
         tokens_used: 0,

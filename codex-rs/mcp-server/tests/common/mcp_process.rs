@@ -11,6 +11,7 @@ use tokio::process::ChildStdout;
 
 use anyhow::Context;
 use codex_mcp_server::CodexToolCallParam;
+use codex_terminal_detection::user_agent;
 
 use pretty_assertions::assert_eq;
 use rmcp::model::CallToolRequestParams;
@@ -113,31 +114,18 @@ impl McpProcess {
     pub async fn initialize(&mut self) -> anyhow::Result<()> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
 
-        let params = InitializeRequestParams {
-            meta: None,
-            capabilities: ClientCapabilities {
-                elicitation: Some(ElicitationCapability {
-                    form: Some(FormElicitationCapability {
-                        schema_validation: None,
-                    }),
-                    url: None,
-                }),
-                experimental: None,
-                extensions: None,
-                roots: None,
-                sampling: None,
-                tasks: None,
-            },
-            client_info: Implementation {
-                name: "elicitation test".into(),
-                title: Some("Elicitation Test".into()),
-                version: "0.0.0".into(),
-                description: None,
-                icons: None,
-                website_url: None,
-            },
-            protocol_version: ProtocolVersion::V_2025_03_26,
-        };
+        let mut capabilities = ClientCapabilities::default();
+        capabilities.elicitation = Some(ElicitationCapability {
+            form: Some(FormElicitationCapability {
+                schema_validation: None,
+            }),
+            url: None,
+        });
+        let params = InitializeRequestParams::new(
+            capabilities,
+            Implementation::new("elicitation test", "0.0.0").with_title("Elicitation Test"),
+        )
+        .with_protocol_version(ProtocolVersion::V_2025_03_26);
         let params_value = serde_json::to_value(params)?;
 
         self.send_jsonrpc_message(JsonRpcMessage::Request(JsonRpcRequest {
@@ -150,13 +138,13 @@ impl McpProcess {
         let initialized = self.read_jsonrpc_message().await?;
         let os_info = os_info::get();
         let build_version = env!("CARGO_PKG_VERSION");
-        let originator = codex_core::default_client::originator().value;
+        let originator = codex_login::default_client::originator().value;
         let user_agent = format!(
             "{originator}/{build_version} ({} {}; {}) {} (elicitation test; 0.0.0)",
             os_info.os_type(),
             os_info.version(),
             os_info.architecture().unwrap_or("unknown"),
-            codex_core::terminal::user_agent()
+            user_agent()
         );
         let JsonRpcMessage::Response(JsonRpcResponse {
             jsonrpc,
@@ -202,15 +190,12 @@ impl McpProcess {
         &mut self,
         params: CodexToolCallParam,
     ) -> anyhow::Result<i64> {
-        let codex_tool_call_params = CallToolRequestParams {
-            meta: None,
-            name: "codex".into(),
-            arguments: Some(match serde_json::to_value(params)? {
+        let codex_tool_call_params = CallToolRequestParams::new("codex").with_arguments(
+            match serde_json::to_value(params)? {
                 serde_json::Value::Object(map) => map,
                 _ => unreachable!("params serialize to object"),
-            }),
-            task: None,
-        };
+            },
+        );
         self.send_request(
             "tools/call",
             Some(serde_json::to_value(codex_tool_call_params)?),

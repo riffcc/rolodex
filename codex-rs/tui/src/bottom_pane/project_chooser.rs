@@ -114,10 +114,11 @@ impl ProjectChooserView {
     }
 
     fn open_project(&mut self, cwd: PathBuf) {
-        self.app_event_tx.send(AppEvent::ResumeProjectAtTarget {
-            cwd,
-            target: self.target,
-        });
+        self.app_event_tx
+            .send(AppEvent::FocusOrOpenProjectAtTarget {
+                cwd,
+                target: self.target,
+            });
         self.complete = true;
     }
 
@@ -294,8 +295,7 @@ impl Renderable for ProjectChooserView {
         Paragraph::new(vec![
             Line::from(self.target_title()).bold(),
             Line::from(
-                "Choose a favorite, or browse into a directory. Enter resumes; X starts fresh."
-                    .dim(),
+                "Choose a favorite, or browse into a directory. Enter opens; X starts fresh.".dim(),
             ),
             Line::from(format_directory_display(&self.browser_root, None).dim()),
         ])
@@ -411,7 +411,7 @@ impl Renderable for ProjectChooserView {
             .render(browser_inner, buf);
 
         Paragraph::new(vec![
-            Line::from("enter to resume project | x to open fresh"),
+            Line::from("enter to open project | x to open fresh"),
             Line::from("right/l to browse directory | esc to cancel").dim(),
         ])
         .render(footer_area, buf);
@@ -528,14 +528,14 @@ mod tests {
     }
 
     #[test]
-    fn project_chooser_confirm_opens_selected_favorite_with_placement() {
+    fn project_chooser_confirm_focuses_or_opens_selected_favorite_with_placement() {
         let (mut view, mut rx) = make_view();
 
         view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(matches!(
             rx.try_recv().expect("expected chooser event"),
-            AppEvent::ResumeProjectAtTarget { cwd, target }
+            AppEvent::FocusOrOpenProjectAtTarget { cwd, target }
                 if cwd == Path::new("/workspace/codex")
                     && target == ProjectOpenTarget::Tab(ProjectTabPlacement::Right)
         ));

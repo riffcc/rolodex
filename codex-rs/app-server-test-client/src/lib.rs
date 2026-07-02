@@ -48,7 +48,6 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
-use codex_app_server_protocol::ReadOnlyAccess;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxPolicy;
 use codex_app_server_protocol::ServerNotification;
@@ -88,20 +87,6 @@ use url::Url;
 use uuid::Uuid;
 
 const NOTIFICATIONS_TO_OPT_OUT: &[&str] = &[
-    // Legacy codex/event (v1-style) deltas.
-    "codex/event/agent_message_content_delta",
-    "codex/event/agent_message_delta",
-    "codex/event/agent_reasoning_delta",
-    "codex/event/reasoning_content_delta",
-    "codex/event/reasoning_raw_content_delta",
-    "codex/event/exec_command_output_delta",
-    // Other legacy events.
-    "codex/event/exec_approval_request",
-    "codex/event/exec_command_begin",
-    "codex/event/exec_command_end",
-    "codex/event/exec_output",
-    "codex/event/item_started",
-    "codex/event/item_completed",
     // v2 item deltas.
     "command/exec/outputDelta",
     "item/agentMessage/delta",
@@ -239,7 +224,11 @@ enum CliCommand {
         abort_on: Option<usize>,
     },
     /// Trigger the ChatGPT login flow and wait for completion.
-    TestLogin,
+    TestLogin {
+        /// Use the device-code login flow instead of the browser callback flow.
+        #[arg(long, default_value_t = false)]
+        device_code: bool,
+    },
     /// Fetch the current account rate limits from the Codex app-server.
     GetAccountRateLimits,
     /// List the available models from the Codex app-server.
@@ -386,10 +375,10 @@ pub async fn run() -> Result<()> {
             )
             .await
         }
-        CliCommand::TestLogin => {
+        CliCommand::TestLogin { device_code } => {
             ensure_dynamic_tools_unused(&dynamic_tools, "test-login")?;
             let endpoint = resolve_endpoint(codex_bin, url)?;
-            test_login(&endpoint, &config_overrides).await
+            test_login(&endpoint, &config_overrides, device_code).await
         }
         CliCommand::GetAccountRateLimits => {
             ensure_dynamic_tools_unused(&dynamic_tools, "get-account-rate-limits")?;
@@ -671,7 +660,7 @@ pub async fn send_message_v2(
         &endpoint,
         config_overrides,
         user_message,
-        true,
+        /*experimental_api*/ true,
         dynamic_tools,
     )
     .await
@@ -745,6 +734,7 @@ async fn trigger_zsh_fork_multi_cmd_approval(
 
             let mut turn_params = TurnStartParams {
                 thread_id: thread_response.thread.id.clone(),
+                client_user_message_id: None,
                 input: vec![V2UserInput::Text {
                     text: message,
                     text_elements: Vec::new(),
@@ -753,7 +743,6 @@ async fn trigger_zsh_fork_multi_cmd_approval(
             };
             turn_params.approval_policy = Some(AskForApproval::OnRequest);
             turn_params.sandbox_policy = Some(SandboxPolicy::ReadOnly {
-                access: ReadOnlyAccess::FullAccess,
                 network_access: false,
             });
 
@@ -830,6 +819,7 @@ async fn resume_message_v2(
 
         let turn_response = client.turn_start(TurnStartParams {
             thread_id: resume_response.thread.id.clone(),
+            client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: user_message,
                 text_elements: Vec::new(),
@@ -895,7 +885,6 @@ async fn trigger_cmd_approval(
             experimental_api: true,
             approval_policy: Some(AskForApproval::OnRequest),
             sandbox_policy: Some(SandboxPolicy::ReadOnly {
-                access: ReadOnlyAccess::FullAccess,
                 network_access: false,
             }),
             dynamic_tools,
@@ -922,7 +911,6 @@ async fn trigger_patch_approval(
             experimental_api: true,
             approval_policy: Some(AskForApproval::OnRequest),
             sandbox_policy: Some(SandboxPolicy::ReadOnly {
-                access: ReadOnlyAccess::FullAccess,
                 network_access: false,
             }),
             dynamic_tools,
@@ -973,6 +961,7 @@ async fn send_message_v2_with_policies(
             println!("< thread/start response: {thread_response:?}");
             let mut turn_params = TurnStartParams {
                 thread_id: thread_response.thread.id.clone(),
+                client_user_message_id: None,
                 input: vec![V2UserInput::Text {
                     text: user_message,
                     // Test client sends plain text without UI element ranges.
@@ -1013,6 +1002,7 @@ async fn send_follow_up_v2(
 
         let first_turn_params = TurnStartParams {
             thread_id: thread_response.thread.id.clone(),
+            client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: first_message,
                 // Test client sends plain text without UI element ranges.
@@ -1026,6 +1016,7 @@ async fn send_follow_up_v2(
 
         let follow_up_params = TurnStartParams {
             thread_id: thread_response.thread.id.clone(),
+            client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: follow_up_message,
                 // Test client sends plain text without UI element ranges.
@@ -1042,17 +1033,38 @@ async fn send_follow_up_v2(
     .await
 }
 
-async fn test_login(endpoint: &Endpoint, config_overrides: &[String]) -> Result<()> {
+async fn test_login(
+    endpoint: &Endpoint,
+    config_overrides: &[String],
+    device_code: bool,
+) -> Result<()> {
     with_client("test-login", endpoint, config_overrides, |client| {
         let initialize = client.initialize()?;
         println!("< initialize response: {initialize:?}");
 
-        let login_response = client.login_account_chatgpt()?;
-        println!("< account/login/start response: {login_response:?}");
-        let LoginAccountResponse::Chatgpt { login_id, auth_url } = login_response else {
-            bail!("expected chatgpt login response");
+        let login_response = if device_code {
+            client.login_account_chatgpt_device_code()?
+        } else {
+            client.login_account_chatgpt()?
         };
-        println!("Open the following URL in your browser to continue:\n{auth_url}");
+        println!("< account/login/start response: {login_response:?}");
+        let login_id = match login_response {
+            LoginAccountResponse::Chatgpt { login_id, auth_url } => {
+                println!("Open the following URL in your browser to continue:\n{auth_url}");
+                login_id
+            }
+            LoginAccountResponse::ChatgptDeviceCode {
+                login_id,
+                verification_url,
+                user_code,
+            } => {
+                println!(
+                    "Open the following URL and enter the code to continue:\n{verification_url}\n\nCode: {user_code}"
+                );
+                login_id
+            }
+            _ => bail!("expected chatgpt login response"),
+        };
 
         let completion = client.wait_for_account_login_completion(&login_id)?;
         println!("< account/login/completed notification: {completion:?}");
@@ -1113,10 +1125,12 @@ async fn thread_list(endpoint: &Endpoint, config_overrides: &[String], limit: u3
             cursor: None,
             limit: Some(limit),
             sort_key: None,
+            sort_direction: None,
             model_providers: None,
             source_kinds: None,
             archived: None,
             cwd: None,
+            use_state_db_only: false,
             search_term: None,
         })?;
         println!("< thread/list response: {response:?}");
@@ -1246,6 +1260,7 @@ fn live_elicitation_timeout_pause(
     let started_at = Instant::now();
     let turn_response = client.turn_start(TurnStartParams {
         thread_id: thread_id.clone(),
+        client_user_message_id: None,
         input: vec![V2UserInput::Text {
             text: prompt,
             text_elements: Vec::new(),
@@ -1524,7 +1539,7 @@ impl CodexClient {
     }
 
     fn initialize(&mut self) -> Result<InitializeResponse> {
-        self.initialize_with_experimental_api(true)
+        self.initialize_with_experimental_api(/*experimental_api*/ true)
     }
 
     fn initialize_with_experimental_api(
@@ -1542,6 +1557,7 @@ impl CodexClient {
                 },
                 capabilities: Some(InitializeCapabilities {
                     experimental_api,
+                    request_attestation: false,
                     opt_out_notification_methods: Some(
                         NOTIFICATIONS_TO_OPT_OUT
                             .iter()
@@ -1598,7 +1614,19 @@ impl CodexClient {
         let request_id = self.request_id();
         let request = ClientRequest::LoginAccount {
             request_id: request_id.clone(),
-            params: codex_app_server_protocol::LoginAccountParams::Chatgpt,
+            params: codex_app_server_protocol::LoginAccountParams::Chatgpt {
+                codex_streamlined_login: false,
+            },
+        };
+
+        self.send_request(request, request_id, "account/login/start")
+    }
+
+    fn login_account_chatgpt_device_code(&mut self) -> Result<LoginAccountResponse> {
+        let request_id = self.request_id();
+        let request = ClientRequest::LoginAccount {
+            request_id: request_id.clone(),
+            params: codex_app_server_protocol::LoginAccountParams::ChatgptDeviceCode,
         };
 
         self.send_request(request, request_id, "account/login/start")
@@ -1924,6 +1952,7 @@ impl CodexClient {
             thread_id,
             turn_id,
             item_id,
+            started_at_ms: _,
             approval_id,
             reason,
             network_approval_context,
@@ -1931,7 +1960,6 @@ impl CodexClient {
             cwd,
             command_actions,
             additional_permissions,
-            skill_metadata,
             proposed_execpolicy_amendment,
             proposed_network_policy_amendments,
             available_decisions,
@@ -1965,9 +1993,6 @@ impl CodexClient {
         }
         if let Some(additional_permissions) = additional_permissions.as_ref() {
             println!("< additional permissions: {additional_permissions:?}");
-        }
-        if let Some(skill_metadata) = skill_metadata.as_ref() {
-            println!("< skill metadata: {skill_metadata:?}");
         }
         if let Some(execpolicy_amendment) = proposed_execpolicy_amendment.as_ref() {
             println!("< proposed execpolicy amendment: {execpolicy_amendment:?}");
@@ -2003,6 +2028,7 @@ impl CodexClient {
             thread_id,
             turn_id,
             item_id,
+            started_at_ms: _,
             reason,
             grant_root,
         } = params;

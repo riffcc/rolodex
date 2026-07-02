@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -32,8 +34,6 @@ use wiremock::http::HeaderName;
 use wiremock::http::HeaderValue;
 use wiremock::matchers::method;
 use wiremock::matchers::path_regex;
-
-use crate::test_codex::ApplyPatchModelOutput;
 
 #[derive(Debug, Clone)]
 pub struct ResponseMock {
@@ -123,6 +123,10 @@ impl ResponsesRequest {
         self.body_json().to_string().contains(&json_fragment)
     }
 
+    pub fn tool_by_name(&self, namespace: &str, tool_name: &str) -> Option<Value> {
+        namespace_child_tool(&self.body_json(), namespace, tool_name).cloned()
+    }
+
     pub fn instructions_text(&self) -> String {
         self.body_json()["instructions"]
             .as_str()
@@ -205,6 +209,10 @@ impl ResponsesRequest {
 
     pub fn custom_tool_call_output(&self, call_id: &str) -> Value {
         self.call_output(call_id, "custom_tool_call_output")
+    }
+
+    pub fn tool_search_output(&self, call_id: &str) -> Value {
+        self.call_output(call_id, "tool_search_output")
     }
 
     pub fn call_output(&self, call_id: &str, call_type: &str) -> Value {
@@ -307,6 +315,31 @@ pub(crate) fn output_value_to_text(value: &Value) -> Option<String> {
         },
         Value::Object(_) | Value::Number(_) | Value::Bool(_) | Value::Null => None,
     }
+}
+
+pub fn namespace_child_tool<'a>(
+    body: &'a Value,
+    namespace: &str,
+    tool_name: &str,
+) -> Option<&'a Value> {
+    let tools = body.get("tools")?.as_array()?;
+    for tool in tools {
+        if tool.get("name").and_then(Value::as_str) != Some(namespace)
+            || tool.get("type").and_then(Value::as_str) != Some("namespace")
+        {
+            continue;
+        }
+
+        let child_tools = tool.get("tools")?.as_array()?;
+        if let Some(child_tool) = child_tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
+        {
+            return Some(child_tool);
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -506,7 +539,14 @@ impl WebSocketTestServer {
 
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(());
-        let _ = self.task.await;
+        let mut task = self.task;
+        if tokio::time::timeout(Duration::from_secs(10), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
     }
 }
 
@@ -597,6 +637,17 @@ pub fn ev_response_created(id: &str) -> Value {
     })
 }
 
+pub fn ev_model_verification_metadata(id: &str, verifications: Vec<&str>) -> Value {
+    serde_json::json!({
+        "type": "response.metadata",
+        "sequence_number": 1,
+        "response_id": id,
+        "metadata": {
+            "openai_verification_recommendation": verifications,
+        }
+    })
+}
+
 pub fn ev_completed_with_tokens(id: &str, total_tokens: i64) -> Value {
     serde_json::json!({
         "type": "response.completed",
@@ -633,7 +684,6 @@ pub fn user_message_item(text: &str) -> ResponseItem {
         content: vec![ContentItem::InputText {
             text: text.to_string(),
         }],
-        end_turn: None,
         phase: None,
     }
 }
@@ -774,6 +824,36 @@ pub fn ev_function_call(call_id: &str, name: &str, arguments: &str) -> Value {
     })
 }
 
+pub fn ev_function_call_with_namespace(
+    call_id: &str,
+    namespace: &str,
+    name: &str,
+    arguments: &str,
+) -> Value {
+    serde_json::json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "call_id": call_id,
+            "namespace": namespace,
+            "name": name,
+            "arguments": arguments
+        }
+    })
+}
+
+pub fn ev_tool_search_call(call_id: &str, arguments: &serde_json::Value) -> Value {
+    serde_json::json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "tool_search_call",
+            "call_id": call_id,
+            "execution": "client",
+            "arguments": arguments,
+        }
+    })
+}
+
 pub fn ev_custom_tool_call(call_id: &str, name: &str, input: &str) -> Value {
     serde_json::json!({
         "type": "response.output_item.done",
@@ -801,27 +881,9 @@ pub fn ev_local_shell_call(call_id: &str, status: &str, command: Vec<&str>) -> V
     })
 }
 
-pub fn ev_apply_patch_call(
-    call_id: &str,
-    patch: &str,
-    output_type: ApplyPatchModelOutput,
-) -> Value {
-    match output_type {
-        ApplyPatchModelOutput::Freeform => ev_apply_patch_custom_tool_call(call_id, patch),
-        ApplyPatchModelOutput::Function => ev_apply_patch_function_call(call_id, patch),
-        ApplyPatchModelOutput::Shell => ev_apply_patch_shell_call(call_id, patch),
-        ApplyPatchModelOutput::ShellViaHeredoc => {
-            ev_apply_patch_shell_call_via_heredoc(call_id, patch)
-        }
-        ApplyPatchModelOutput::ShellCommandViaHeredoc => {
-            ev_apply_patch_shell_command_call_via_heredoc(call_id, patch)
-        }
-    }
-}
-
 /// Convenience: SSE event for an `apply_patch` custom tool call with raw patch
 /// text. This mirrors the payload produced by the Responses API when the model
-/// invokes `apply_patch` directly (before we convert it to a function call).
+/// invokes `apply_patch` directly.
 pub fn ev_apply_patch_custom_tool_call(call_id: &str, patch: &str) -> Value {
     serde_json::json!({
         "type": "response.output_item.done",
@@ -829,24 +891,6 @@ pub fn ev_apply_patch_custom_tool_call(call_id: &str, patch: &str) -> Value {
             "type": "custom_tool_call",
             "name": "apply_patch",
             "input": patch,
-            "call_id": call_id
-        }
-    })
-}
-
-/// Convenience: SSE event for an `apply_patch` function call. The Responses API
-/// wraps the patch content in a JSON string under the `input` key; we recreate
-/// the same structure so downstream code exercises the full parsing path.
-pub fn ev_apply_patch_function_call(call_id: &str, patch: &str) -> Value {
-    let arguments = serde_json::json!({ "input": patch });
-    let arguments = serde_json::to_string(&arguments).expect("serialize apply_patch arguments");
-
-    serde_json::json!({
-        "type": "response.output_item.done",
-        "item": {
-            "type": "function_call",
-            "name": "apply_patch",
-            "arguments": arguments,
             "call_id": call_id
         }
     })
@@ -860,21 +904,6 @@ pub fn ev_shell_command_call(call_id: &str, command: &str) -> Value {
 pub fn ev_shell_command_call_with_args(call_id: &str, args: &serde_json::Value) -> Value {
     let arguments = serde_json::to_string(args).expect("serialize shell command arguments");
     ev_function_call(call_id, "shell_command", &arguments)
-}
-
-pub fn ev_apply_patch_shell_call(call_id: &str, patch: &str) -> Value {
-    let args = serde_json::json!({ "command": ["apply_patch", patch] });
-    let arguments = serde_json::to_string(&args).expect("serialize apply_patch arguments");
-
-    ev_function_call(call_id, "shell", &arguments)
-}
-
-pub fn ev_apply_patch_shell_call_via_heredoc(call_id: &str, patch: &str) -> Value {
-    let script = format!("apply_patch <<'EOF'\n{patch}\nEOF\n");
-    let args = serde_json::json!({ "command": ["bash", "-lc", script] });
-    let arguments = serde_json::to_string(&args).expect("serialize apply_patch arguments");
-
-    ev_function_call(call_id, "shell", &arguments)
 }
 
 pub fn ev_apply_patch_shell_command_call_via_heredoc(call_id: &str, patch: &str) -> Value {
@@ -1484,11 +1513,13 @@ pub async fn mount_response_sequence(
 /// Validate invariants on the request body sent to `/v1/responses`.
 ///
 /// - No `function_call_output`/`custom_tool_call_output` with missing/empty `call_id`.
+/// - `tool_search_output` must have a `call_id` unless it is a server-executed legacy item.
 /// - Every `function_call_output` must match a prior `function_call` or
 ///   `local_shell_call` with the same `call_id` in the same `input`.
 /// - Every `custom_tool_call_output` must match a prior `custom_tool_call`.
-/// - Additionally, enforce symmetry: every `function_call`/`custom_tool_call`
-///   in the `input` must have a matching output entry.
+/// - Every `tool_search_output` must match a prior `tool_search_call`.
+/// - Additionally, enforce symmetry: every `function_call`/`custom_tool_call`/
+///   `tool_search_call` in the `input` must have a matching output entry.
 fn validate_request_body_invariants(request: &wiremock::Request) {
     // Skip GET requests (e.g., /models)
     if request.method != "POST" || !request.url.path().ends_with("/responses") {
@@ -1538,7 +1569,24 @@ fn validate_request_body_invariants(request: &wiremock::Request) {
             .collect()
     }
 
+    fn gather_tool_search_output_ids(items: &[Value]) -> HashSet<String> {
+        items
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_search_output"))
+            .filter_map(|item| {
+                if let Some(id) = get_call_id(item) {
+                    return Some(id.to_string());
+                }
+                if item.get("execution").and_then(Value::as_str) == Some("server") {
+                    return None;
+                }
+                panic!("orphan tool_search_output with empty call_id should be dropped");
+            })
+            .collect()
+    }
+
     let function_calls = gather_ids(items, "function_call");
+    let tool_search_calls = gather_ids(items, "tool_search_call");
     let custom_tool_calls = gather_ids(items, "custom_tool_call");
     let local_shell_calls = gather_ids(items, "local_shell_call");
     let function_call_outputs = gather_output_ids(
@@ -1546,6 +1594,7 @@ fn validate_request_body_invariants(request: &wiremock::Request) {
         "function_call_output",
         "orphan function_call_output with empty call_id should be dropped",
     );
+    let tool_search_outputs = gather_tool_search_output_ids(items);
     let custom_tool_call_outputs = gather_output_ids(
         items,
         "custom_tool_call_output",
@@ -1564,6 +1613,12 @@ fn validate_request_body_invariants(request: &wiremock::Request) {
             "custom_tool_call_output without matching call in input: {cid}",
         );
     }
+    for cid in &tool_search_outputs {
+        assert!(
+            tool_search_calls.contains(cid),
+            "tool_search_output without matching call in input: {cid}",
+        );
+    }
 
     for cid in &function_calls {
         assert!(
@@ -1575,6 +1630,12 @@ fn validate_request_body_invariants(request: &wiremock::Request) {
         assert!(
             custom_tool_call_outputs.contains(cid),
             "Custom tool call output is missing for call id: {cid}",
+        );
+    }
+    for cid in &tool_search_calls {
+        assert!(
+            tool_search_outputs.contains(cid),
+            "Tool search output is missing for call id: {cid}",
         );
     }
 }

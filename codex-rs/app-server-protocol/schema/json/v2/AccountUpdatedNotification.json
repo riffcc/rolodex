@@ -24,6 +24,20 @@
             "chatgptAuthTokens"
           ],
           "type": "string"
+        },
+        {
+          "description": "Programmatic Codex auth backed by a registered Agent Identity.",
+          "enum": [
+            "agentIdentity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Programmatic Codex auth backed by a personal access token.",
+          "enum": [
+            "personalAccessToken"
+          ],
+          "type": "string"
         }
       ]
     },
@@ -33,8 +47,11 @@
         "go",
         "plus",
         "pro",
+        "prolite",
         "team",
+        "self_serve_business_usage_based",
         "business",
+        "enterprise_cbp_usage_based",
         "enterprise",
         "edu",
         "unknown"

@@ -1,21 +1,24 @@
 //! Session-wide mutable state.
 
-use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use tokio::task::JoinHandle;
+use std::collections::VecDeque;
 
-use crate::codex::PreviousTurnSettings;
-use crate::codex::SessionConfiguration;
+use super::AdditionalContextStore;
+use super::auto_compact_window::AutoCompactWindow;
+use super::auto_compact_window::AutoCompactWindowSnapshot;
 use crate::context_manager::ContextManager;
-use crate::error::Result as CodexResult;
-use crate::protocol::RateLimitSnapshot;
-use crate::protocol::TokenUsage;
-use crate::protocol::TokenUsageInfo;
-use crate::tasks::RegularTask;
-use crate::truncate::TruncationPolicy;
+use crate::session::PreviousTurnSettings;
+use crate::session::session::SessionConfiguration;
+use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
+use codex_protocol::protocol::RateLimitSnapshot;
+use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnContextItem;
+use codex_utils_output_truncation::TruncationPolicy;
 
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
@@ -23,18 +26,20 @@ pub(crate) struct SessionState {
     pub(crate) history: ContextManager,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) server_reasoning_included: bool,
-    pub(crate) dependency_env: HashMap<String, String>,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
+    pub(crate) additional_context: AdditionalContextStore,
     /// Settings used by the latest regular user turn, used for turn-to-turn
     /// model/realtime handling on subsequent regular turns (including full-context
     /// reinjection after resume or `/compact`).
     previous_turn_settings: Option<PreviousTurnSettings>,
-    /// Startup regular task pre-created during session initialization.
-    pub(crate) startup_regular_task: Option<JoinHandle<CodexResult<RegularTask>>>,
-    pub(crate) active_mcp_tool_selection: Option<Vec<String>>,
+    /// Runtime accounting state for the active auto-compaction window.
+    auto_compact_window: AutoCompactWindow,
+    /// Startup prewarmed session prepared during session initialization.
+    pub(crate) startup_prewarm: Option<SessionStartupPrewarmHandle>,
     pub(crate) active_connector_selection: HashSet<String>,
-    pub(crate) pending_session_start_source: Option<codex_hooks::SessionStartSource>,
-    granted_permissions: Option<PermissionProfile>,
+    pub(crate) pending_session_start_sources: VecDeque<codex_hooks::SessionStartSource>,
+    granted_permissions_by_environment_id: HashMap<String, AdditionalPermissionProfile>,
+    next_turn_is_first: bool,
 }
 
 impl SessionState {
@@ -46,14 +51,15 @@ impl SessionState {
             history,
             latest_rate_limits: None,
             server_reasoning_included: false,
-            dependency_env: HashMap::new(),
             mcp_dependency_prompted: HashSet::new(),
+            additional_context: AdditionalContextStore::default(),
             previous_turn_settings: None,
-            startup_regular_task: None,
-            active_mcp_tool_selection: None,
+            auto_compact_window: AutoCompactWindow::new(),
+            startup_prewarm: None,
             active_connector_selection: HashSet::new(),
-            pending_session_start_source: None,
-            granted_permissions: None,
+            pending_session_start_sources: VecDeque::new(),
+            granted_permissions_by_environment_id: HashMap::new(),
+            next_turn_is_first: true,
         }
     }
 
@@ -76,6 +82,16 @@ impl SessionState {
         self.previous_turn_settings = previous_turn_settings;
     }
 
+    pub(crate) fn set_next_turn_is_first(&mut self, value: bool) {
+        self.next_turn_is_first = value;
+    }
+
+    pub(crate) fn take_next_turn_is_first(&mut self) -> bool {
+        let is_first_turn = self.next_turn_is_first;
+        self.next_turn_is_first = false;
+        is_first_turn
+    }
+
     pub(crate) fn clone_history(&self) -> ContextManager {
         self.history.clone()
     }
@@ -88,6 +104,7 @@ impl SessionState {
         self.history.replace(items);
         self.history
             .set_reference_context_item(reference_context_item);
+        self.auto_compact_window.clear_prefill();
     }
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
@@ -109,6 +126,26 @@ impl SessionState {
         model_context_window: Option<i64>,
     ) {
         self.history.update_token_info(usage, model_context_window);
+    }
+
+    pub(crate) fn ensure_auto_compact_window_server_prefill_from_usage(
+        &mut self,
+        usage: &TokenUsage,
+    ) {
+        self.auto_compact_window
+            .ensure_server_observed_prefill_from_usage(usage);
+    }
+
+    pub(crate) fn set_auto_compact_window_estimated_prefill(&mut self, tokens: i64) {
+        self.auto_compact_window.set_estimated_prefill(tokens);
+    }
+
+    pub(crate) fn start_next_auto_compact_window(&mut self) {
+        self.auto_compact_window.start_next();
+    }
+
+    pub(crate) fn auto_compact_window_snapshot(&self) -> AutoCompactWindowSnapshot {
+        self.auto_compact_window.snapshot()
     }
 
     pub(crate) fn token_info(&self) -> Option<TokenUsageInfo> {
@@ -156,82 +193,15 @@ impl SessionState {
         self.mcp_dependency_prompted.clone()
     }
 
-    pub(crate) fn set_dependency_env(&mut self, values: HashMap<String, String>) {
-        for (key, value) in values {
-            self.dependency_env.insert(key, value);
-        }
-    }
-
-    pub(crate) fn dependency_env(&self) -> HashMap<String, String> {
-        self.dependency_env.clone()
-    }
-
-    pub(crate) fn set_startup_regular_task(&mut self, task: JoinHandle<CodexResult<RegularTask>>) {
-        self.startup_regular_task = Some(task);
-    }
-
-    pub(crate) fn take_startup_regular_task(
+    pub(crate) fn set_session_startup_prewarm(
         &mut self,
-    ) -> Option<JoinHandle<CodexResult<RegularTask>>> {
-        self.startup_regular_task.take()
+        startup_prewarm: SessionStartupPrewarmHandle,
+    ) {
+        self.startup_prewarm = Some(startup_prewarm);
     }
 
-    pub(crate) fn merge_mcp_tool_selection(&mut self, tool_names: Vec<String>) -> Vec<String> {
-        if tool_names.is_empty() {
-            return self.active_mcp_tool_selection.clone().unwrap_or_default();
-        }
-
-        let mut merged = self.active_mcp_tool_selection.take().unwrap_or_default();
-        let mut seen: HashSet<String> = merged.iter().cloned().collect();
-
-        for tool_name in tool_names {
-            if seen.insert(tool_name.clone()) {
-                merged.push(tool_name);
-            }
-        }
-
-        self.active_mcp_tool_selection = Some(merged.clone());
-        merged
-    }
-
-    pub(crate) fn set_mcp_tool_selection(&mut self, tool_names: Vec<String>) {
-        if tool_names.is_empty() {
-            self.active_mcp_tool_selection = None;
-            return;
-        }
-
-        let mut selected = Vec::new();
-        let mut seen = HashSet::new();
-        for tool_name in tool_names {
-            if seen.insert(tool_name.clone()) {
-                selected.push(tool_name);
-            }
-        }
-
-        self.active_mcp_tool_selection = if selected.is_empty() {
-            None
-        } else {
-            Some(selected)
-        };
-    }
-
-    pub(crate) fn get_mcp_tool_selection(&self) -> Option<Vec<String>> {
-        self.active_mcp_tool_selection.clone()
-    }
-
-    pub(crate) fn clear_mcp_tool_selection(&mut self) {
-        self.active_mcp_tool_selection = None;
-    }
-
-    pub(crate) fn record_granted_permissions(&mut self, permissions: PermissionProfile) {
-        self.granted_permissions = crate::sandboxing::merge_permission_profiles(
-            self.granted_permissions.as_ref(),
-            Some(&permissions),
-        );
-    }
-
-    pub(crate) fn granted_permissions(&self) -> Option<PermissionProfile> {
-        self.granted_permissions.clone()
+    pub(crate) fn take_session_startup_prewarm(&mut self) -> Option<SessionStartupPrewarmHandle> {
+        self.startup_prewarm.take()
     }
 
     // Adds connector IDs to the active set and returns the merged selection.
@@ -253,17 +223,42 @@ impl SessionState {
         self.active_connector_selection.clear();
     }
 
-    pub(crate) fn set_pending_session_start_source(
+    pub(crate) fn queue_pending_session_start_source(
         &mut self,
-        value: Option<codex_hooks::SessionStartSource>,
+        value: codex_hooks::SessionStartSource,
     ) {
-        self.pending_session_start_source = value;
+        self.pending_session_start_sources.push_back(value);
     }
 
     pub(crate) fn take_pending_session_start_source(
         &mut self,
     ) -> Option<codex_hooks::SessionStartSource> {
-        self.pending_session_start_source.take()
+        self.pending_session_start_sources.pop_front()
+    }
+
+    pub(crate) fn record_granted_permissions(
+        &mut self,
+        environment_id: &str,
+        permissions: AdditionalPermissionProfile,
+    ) {
+        let granted_permissions = merge_permission_profiles(
+            self.granted_permissions_by_environment_id
+                .get(environment_id),
+            Some(&permissions),
+        );
+        if let Some(granted_permissions) = granted_permissions {
+            self.granted_permissions_by_environment_id
+                .insert(environment_id.to_string(), granted_permissions);
+        }
+    }
+
+    pub(crate) fn granted_permissions(
+        &self,
+        environment_id: &str,
+    ) -> Option<AdditionalPermissionProfile> {
+        self.granted_permissions_by_environment_id
+            .get(environment_id)
+            .cloned()
     }
 }
 
@@ -280,6 +275,9 @@ fn merge_rate_limit_fields(
     if snapshot.credits.is_none() {
         snapshot.credits = previous.and_then(|prior| prior.credits.clone());
     }
+    if snapshot.individual_limit.is_none() {
+        snapshot.individual_limit = previous.and_then(|prior| prior.individual_limit.clone());
+    }
     if snapshot.plan_type.is_none() {
         snapshot.plan_type = previous.and_then(|prior| prior.plan_type);
     }
@@ -287,263 +285,5 @@ fn merge_rate_limit_fields(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::codex::make_session_configuration_for_tests;
-    use crate::protocol::RateLimitWindow;
-    use pretty_assertions::assert_eq;
-
-    #[tokio::test]
-    async fn merge_mcp_tool_selection_deduplicates_and_preserves_order() {
-        let session_configuration = make_session_configuration_for_tests().await;
-        let mut state = SessionState::new(session_configuration);
-
-        let merged = state.merge_mcp_tool_selection(vec![
-            "mcp__rmcp__echo".to_string(),
-            "mcp__rmcp__image".to_string(),
-            "mcp__rmcp__echo".to_string(),
-        ]);
-        assert_eq!(
-            merged,
-            vec![
-                "mcp__rmcp__echo".to_string(),
-                "mcp__rmcp__image".to_string(),
-            ]
-        );
-
-        let merged = state.merge_mcp_tool_selection(vec![
-            "mcp__rmcp__image".to_string(),
-            "mcp__rmcp__search".to_string(),
-        ]);
-        assert_eq!(
-            merged,
-            vec![
-                "mcp__rmcp__echo".to_string(),
-                "mcp__rmcp__image".to_string(),
-                "mcp__rmcp__search".to_string(),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn merge_mcp_tool_selection_empty_input_is_noop() {
-        let session_configuration = make_session_configuration_for_tests().await;
-        let mut state = SessionState::new(session_configuration);
-        state.merge_mcp_tool_selection(vec![
-            "mcp__rmcp__echo".to_string(),
-            "mcp__rmcp__image".to_string(),
-        ]);
-
-        let merged = state.merge_mcp_tool_selection(Vec::new());
-        assert_eq!(
-            merged,
-            vec![
-                "mcp__rmcp__echo".to_string(),
-                "mcp__rmcp__image".to_string(),
-            ]
-        );
-        assert_eq!(
-            state.get_mcp_tool_selection(),
-            Some(vec![
-                "mcp__rmcp__echo".to_string(),
-                "mcp__rmcp__image".to_string(),
-            ])
-        );
-    }
-
-    #[tokio::test]
-    async fn clear_mcp_tool_selection_removes_selection() {
-        let session_configuration = make_session_configuration_for_tests().await;
-        let mut state = SessionState::new(session_configuration);
-        state.merge_mcp_tool_selection(vec!["mcp__rmcp__echo".to_string()]);
-
-        state.clear_mcp_tool_selection();
-
-        assert_eq!(state.get_mcp_tool_selection(), None);
-    }
-
-    #[tokio::test]
-    async fn set_mcp_tool_selection_deduplicates_and_preserves_order() {
-        let session_configuration = make_session_configuration_for_tests().await;
-        let mut state = SessionState::new(session_configuration);
-        state.merge_mcp_tool_selection(vec!["mcp__rmcp__old".to_string()]);
-
-        state.set_mcp_tool_selection(vec![
-            "mcp__rmcp__echo".to_string(),
-            "mcp__rmcp__image".to_string(),
-            "mcp__rmcp__echo".to_string(),
-            "mcp__rmcp__search".to_string(),
-        ]);
-
-        assert_eq!(
-            state.get_mcp_tool_selection(),
-            Some(vec![
-                "mcp__rmcp__echo".to_string(),
-                "mcp__rmcp__image".to_string(),
-                "mcp__rmcp__search".to_string(),
-            ])
-        );
-    }
-
-    #[tokio::test]
-    async fn set_mcp_tool_selection_empty_input_clears_selection() {
-        let session_configuration = make_session_configuration_for_tests().await;
-        let mut state = SessionState::new(session_configuration);
-        state.merge_mcp_tool_selection(vec!["mcp__rmcp__echo".to_string()]);
-
-        state.set_mcp_tool_selection(Vec::new());
-
-        assert_eq!(state.get_mcp_tool_selection(), None);
-    }
-
-    #[tokio::test]
-    // Verifies connector merging deduplicates repeated IDs.
-    async fn merge_connector_selection_deduplicates_entries() {
-        let session_configuration = make_session_configuration_for_tests().await;
-        let mut state = SessionState::new(session_configuration);
-        let merged = state.merge_connector_selection([
-            "calendar".to_string(),
-            "calendar".to_string(),
-            "drive".to_string(),
-        ]);
-
-        assert_eq!(
-            merged,
-            HashSet::from(["calendar".to_string(), "drive".to_string()])
-        );
-    }
-
-    #[tokio::test]
-    // Verifies clearing connector selection removes all saved IDs.
-    async fn clear_connector_selection_removes_entries() {
-        let session_configuration = make_session_configuration_for_tests().await;
-        let mut state = SessionState::new(session_configuration);
-        state.merge_connector_selection(["calendar".to_string()]);
-
-        state.clear_connector_selection();
-
-        assert_eq!(state.get_connector_selection(), HashSet::new());
-    }
-
-    #[tokio::test]
-    async fn set_rate_limits_defaults_limit_id_to_codex_when_missing() {
-        let session_configuration = make_session_configuration_for_tests().await;
-        let mut state = SessionState::new(session_configuration);
-
-        state.set_rate_limits(RateLimitSnapshot {
-            limit_id: None,
-            limit_name: None,
-            primary: Some(RateLimitWindow {
-                used_percent: 12.0,
-                window_minutes: Some(60),
-                resets_at: Some(100),
-            }),
-            secondary: None,
-            credits: None,
-            plan_type: None,
-        });
-
-        assert_eq!(
-            state
-                .latest_rate_limits
-                .as_ref()
-                .and_then(|v| v.limit_id.clone()),
-            Some("codex".to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn set_rate_limits_defaults_to_codex_when_limit_id_missing_after_other_bucket() {
-        let session_configuration = make_session_configuration_for_tests().await;
-        let mut state = SessionState::new(session_configuration);
-
-        state.set_rate_limits(RateLimitSnapshot {
-            limit_id: Some("codex_other".to_string()),
-            limit_name: Some("codex_other".to_string()),
-            primary: Some(RateLimitWindow {
-                used_percent: 20.0,
-                window_minutes: Some(60),
-                resets_at: Some(200),
-            }),
-            secondary: None,
-            credits: None,
-            plan_type: None,
-        });
-        state.set_rate_limits(RateLimitSnapshot {
-            limit_id: None,
-            limit_name: None,
-            primary: Some(RateLimitWindow {
-                used_percent: 30.0,
-                window_minutes: Some(60),
-                resets_at: Some(300),
-            }),
-            secondary: None,
-            credits: None,
-            plan_type: None,
-        });
-
-        assert_eq!(
-            state
-                .latest_rate_limits
-                .as_ref()
-                .and_then(|v| v.limit_id.clone()),
-            Some("codex".to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn set_rate_limits_carries_credits_and_plan_type_from_codex_to_codex_other() {
-        let session_configuration = make_session_configuration_for_tests().await;
-        let mut state = SessionState::new(session_configuration);
-
-        state.set_rate_limits(RateLimitSnapshot {
-            limit_id: Some("codex".to_string()),
-            limit_name: Some("codex".to_string()),
-            primary: Some(RateLimitWindow {
-                used_percent: 10.0,
-                window_minutes: Some(60),
-                resets_at: Some(100),
-            }),
-            secondary: None,
-            credits: Some(crate::protocol::CreditsSnapshot {
-                has_credits: true,
-                unlimited: false,
-                balance: Some("50".to_string()),
-            }),
-            plan_type: Some(codex_protocol::account::PlanType::Plus),
-        });
-
-        state.set_rate_limits(RateLimitSnapshot {
-            limit_id: Some("codex_other".to_string()),
-            limit_name: None,
-            primary: Some(RateLimitWindow {
-                used_percent: 30.0,
-                window_minutes: Some(120),
-                resets_at: Some(200),
-            }),
-            secondary: None,
-            credits: None,
-            plan_type: None,
-        });
-
-        assert_eq!(
-            state.latest_rate_limits,
-            Some(RateLimitSnapshot {
-                limit_id: Some("codex_other".to_string()),
-                limit_name: None,
-                primary: Some(RateLimitWindow {
-                    used_percent: 30.0,
-                    window_minutes: Some(120),
-                    resets_at: Some(200),
-                }),
-                secondary: None,
-                credits: Some(crate::protocol::CreditsSnapshot {
-                    has_credits: true,
-                    unlimited: false,
-                    balance: Some("50".to_string()),
-                }),
-                plan_type: Some(codex_protocol::account::PlanType::Plus),
-            })
-        );
-    }
-}
+#[path = "session_tests.rs"]
+mod tests;

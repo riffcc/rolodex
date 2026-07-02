@@ -297,10 +297,11 @@ impl ProjectSwitcherView {
             }
             ProjectSwitcherSection::Favorites => {
                 if let Some(tile) = self.favorites.get(self.selected_favorite_idx) {
-                    self.app_event_tx.send(AppEvent::ResumeProjectAtTarget {
-                        cwd: tile.cwd.clone(),
-                        target: ProjectOpenTarget::Tab(ProjectTabPlacement::Right),
-                    });
+                    self.app_event_tx
+                        .send(AppEvent::FocusOrOpenProjectAtTarget {
+                            cwd: tile.cwd.clone(),
+                            target: ProjectOpenTarget::Tab(ProjectTabPlacement::Right),
+                        });
                     self.complete = true;
                 }
             }
@@ -858,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn confirm_on_favorite_opens_resume_picker_for_project() {
+    fn confirm_on_favorite_focuses_or_opens_project() {
         let (mut view, mut rx) = make_view();
 
         view.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -866,7 +867,7 @@ mod tests {
 
         assert!(matches!(
             rx.try_recv().expect("expected switcher event"),
-            AppEvent::ResumeProjectAtTarget { cwd, target }
+            AppEvent::FocusOrOpenProjectAtTarget { cwd, target }
                 if cwd == Path::new("/workspace/flagship")
                     && target == ProjectOpenTarget::Tab(ProjectTabPlacement::Right)
         ));
@@ -888,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn favorites_editor_confirm_on_favorite_opens_resume_picker_for_project() {
+    fn favorites_editor_confirm_on_favorite_focuses_or_opens_project() {
         let (tx, mut rx) = unbounded_channel::<AppEvent>();
         let mut view = FavoritesEditorView::new(
             AppEventSender::new(tx),
@@ -915,9 +916,7 @@ mod tests {
 
         assert!(matches!(
             rx.try_recv().expect("expected favorites editor event"),
-            AppEvent::ResumeProjectAtTarget { cwd, target }
-                if cwd == Path::new("/workspace/flagship")
-                    && target == ProjectOpenTarget::Tab(ProjectTabPlacement::Right)
+            AppEvent::FocusOrOpenProject { cwd } if cwd == Path::new("/workspace/flagship")
         ));
         assert!(view.is_complete());
     }
@@ -1014,19 +1013,16 @@ impl FavoritesEditorView {
         match self.focused_pane {
             FavoritesPane::Favorites => {
                 if let Some(tile) = self.favorites.get(self.selected_favorite_idx) {
-                    self.app_event_tx.send(AppEvent::ResumeProjectAtTarget {
+                    self.app_event_tx.send(AppEvent::FocusOrOpenProject {
                         cwd: tile.cwd.clone(),
-                        target: ProjectOpenTarget::Tab(ProjectTabPlacement::Right),
                     });
                     self.complete = true;
                 }
             }
             FavoritesPane::Browser => {
                 if let Some(path) = self.current_browser_path() {
-                    self.app_event_tx.send(AppEvent::ResumeProjectAtTarget {
-                        cwd: path,
-                        target: ProjectOpenTarget::Tab(ProjectTabPlacement::Right),
-                    });
+                    self.app_event_tx
+                        .send(AppEvent::FocusOrOpenProject { cwd: path });
                     self.complete = true;
                 }
             }

@@ -44,12 +44,10 @@ pub(crate) fn create_call_tool_result_with_thread_id(
         "threadId": thread_id,
         "content": content_text,
     });
-    CallToolResult {
-        content,
-        is_error,
-        structured_content: Some(structured_content),
-        meta: None,
-    }
+    let mut result = CallToolResult::success(content);
+    result.is_error = is_error;
+    result.structured_content = Some(structured_content);
+    result
 }
 
 /// Run a complete Codex session and stream events back to the client.
@@ -68,15 +66,12 @@ pub async fn run_codex_tool_session(
         thread_id,
         thread,
         session_configured,
-    } = match thread_manager.start_thread(config).await {
+    } = match thread_manager.start_thread(config.clone()).await {
         Ok(res) => res,
         Err(e) => {
-            let result = CallToolResult {
-                content: vec![Content::text(format!("Failed to start Codex session: {e}"))],
-                is_error: Some(true),
-                structured_content: None,
-                meta: None,
-            };
+            let result = CallToolResult::error(vec![Content::text(format!(
+                "Failed to start Codex session: {e}"
+            ))]);
             outgoing.send_response(id.clone(), result).await;
             return;
         }
@@ -114,7 +109,11 @@ pub async fn run_codex_tool_session(
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         },
+        client_user_message_id: None,
         trace: None,
     };
 
@@ -161,6 +160,9 @@ pub async fn run_codex_tool_session_reply(
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
     {
@@ -218,6 +220,7 @@ async fn run_codex_tool_session_inner(
                         let approval_id = ev.effective_approval_id();
                         let ExecApprovalRequestEvent {
                             turn_id: _,
+                            started_at_ms: _,
                             command,
                             cwd,
                             call_id,
@@ -228,12 +231,11 @@ async fn run_codex_tool_session_inner(
                             parsed_cmd,
                             network_approval_context: _,
                             additional_permissions: _,
-                            skill_metadata: _,
                             available_decisions: _,
                         } = ev;
                         handle_exec_approval_request(
                             command,
-                            cwd,
+                            cwd.to_path_buf(),
                             outgoing.clone(),
                             thread.clone(),
                             request_id.clone(),
@@ -260,7 +262,13 @@ async fn run_codex_tool_session_inner(
                         outgoing.send_response(request_id.clone(), result).await;
                         break;
                     }
-                    EventMsg::Warning(_) => {
+                    EventMsg::Warning(_)
+                    | EventMsg::GuardianWarning(_)
+                    | EventMsg::ModelVerification(_)
+                    | EventMsg::TurnModerationMetadata(_) => {
+                        continue;
+                    }
+                    EventMsg::GuardianAssessment(_) => {
                         continue;
                     }
                     EventMsg::ElicitationRequest(_) => {
@@ -270,6 +278,7 @@ async fn run_codex_tool_session_inner(
                     EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
                         call_id,
                         turn_id: _,
+                        started_at_ms: _,
                         reason,
                         grant_root,
                         changes,
@@ -296,7 +305,9 @@ async fn run_codex_tool_session_inner(
                             Some(msg) => msg,
                             None => "".to_string(),
                         };
-                        let result = create_call_tool_result_with_thread_id(thread_id, text, None);
+                        let result = create_call_tool_result_with_thread_id(
+                            thread_id, text, /*is_error*/ None,
+                        );
                         outgoing.send_response(request_id.clone(), result).await;
                         // unregister the id so we don't keep it in the map
                         running_requests_id_to_codex_uuid
@@ -308,14 +319,8 @@ async fn run_codex_tool_session_inner(
                     EventMsg::SessionConfigured(_) => {
                         tracing::error!("unexpected SessionConfigured event");
                     }
-                    EventMsg::ThreadNameUpdated(_) => {
-                        // Ignore session metadata updates in MCP tool runner.
-                    }
-                    EventMsg::AgentMessageDelta(_) => {
-                        // TODO: think how we want to support this in the MCP
-                    }
-                    EventMsg::AgentReasoningDelta(_) => {
-                        // TODO: think how we want to support this in the MCP
+                    EventMsg::ThreadGoalUpdated(_) => {
+                        // Ignore thread goal metadata updates in MCP tool runner.
                     }
                     EventMsg::McpStartupUpdate(_) | EventMsg::McpStartupComplete(_) => {
                         // Ignored in MCP tool runner.
@@ -324,39 +329,32 @@ async fn run_codex_tool_session_inner(
                         // TODO: think how we want to support this in the MCP
                     }
                     EventMsg::AgentReasoningRawContent(_)
-                    | EventMsg::AgentReasoningRawContentDelta(_)
                     | EventMsg::TurnStarted(_)
+                    | EventMsg::ThreadSettingsApplied(_)
                     | EventMsg::TokenCount(_)
                     | EventMsg::AgentReasoning(_)
                     | EventMsg::AgentReasoningSectionBreak(_)
                     | EventMsg::McpToolCallBegin(_)
                     | EventMsg::McpToolCallEnd(_)
-                    | EventMsg::FunctionToolCallBegin(_)
-                    | EventMsg::FunctionToolCallEnd(_)
-                    | EventMsg::McpListToolsResponse(_)
-                    | EventMsg::ListCustomPromptsResponse(_)
-                    | EventMsg::ListSkillsResponse(_)
-                    | EventMsg::ListRemoteSkillsResponse(_)
-                    | EventMsg::RemoteSkillDownloaded(_)
+                    | EventMsg::RealtimeConversationListVoicesResponse(_)
                     | EventMsg::ExecCommandBegin(_)
                     | EventMsg::TerminalInteraction(_)
                     | EventMsg::ExecCommandOutputDelta(_)
                     | EventMsg::ExecCommandEnd(_)
-                    | EventMsg::BackgroundEvent(_)
                     | EventMsg::StreamError(_)
                     | EventMsg::PatchApplyBegin(_)
+                    | EventMsg::PatchApplyUpdated(_)
                     | EventMsg::PatchApplyEnd(_)
                     | EventMsg::TurnDiff(_)
                     | EventMsg::WebSearchBegin(_)
                     | EventMsg::WebSearchEnd(_)
-                    | EventMsg::GetHistoryEntryResponse(_)
                     | EventMsg::PlanUpdate(_)
                     | EventMsg::TurnAborted(_)
                     | EventMsg::UserMessage(_)
                     | EventMsg::ShutdownComplete
-                    | EventMsg::ViewImageToolCall(_)
                     | EventMsg::ImageGenerationBegin(_)
                     | EventMsg::ImageGenerationEnd(_)
+                    | EventMsg::ViewImageToolCall(_)
                     | EventMsg::RawResponseItem(_)
                     | EventMsg::EnteredReviewMode(_)
                     | EventMsg::ItemStarted(_)
@@ -366,9 +364,6 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::AgentMessageContentDelta(_)
                     | EventMsg::ReasoningContentDelta(_)
                     | EventMsg::ReasoningRawContentDelta(_)
-                    | EventMsg::SkillsUpdateAvailable
-                    | EventMsg::UndoStarted(_)
-                    | EventMsg::UndoCompleted(_)
                     | EventMsg::ExitedReviewMode(_)
                     | EventMsg::RequestUserInput(_)
                     | EventMsg::RequestPermissions(_)
@@ -388,6 +383,7 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::CollabResumeBegin(_)
                     | EventMsg::CollabResumeEnd(_)
                     | EventMsg::RealtimeConversationStarted(_)
+                    | EventMsg::RealtimeConversationSdp(_)
                     | EventMsg::RealtimeConversationRealtime(_)
                     | EventMsg::RealtimeConversationClosed(_)
                     | EventMsg::DeprecationNotice(_) => {
@@ -421,7 +417,11 @@ mod tests {
     #[test]
     fn call_tool_result_includes_thread_id_in_structured_content() {
         let thread_id = ThreadId::new();
-        let result = create_call_tool_result_with_thread_id(thread_id, "done".to_string(), None);
+        let result = create_call_tool_result_with_thread_id(
+            thread_id,
+            "done".to_string(),
+            /*is_error*/ None,
+        );
         assert_eq!(
             result.structured_content,
             Some(json!({

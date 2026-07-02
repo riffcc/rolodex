@@ -15,7 +15,7 @@ def main() -> None:
     text = CARGO.read_text(encoding="utf-8")
     new_text, count = re.subn(
         r'(?ms)(\[workspace\.package\]\n(?:.*?\n)*?version = ")([^"]+)(")',
-        rf'\g<1>{args.version}\3',
+        rf"\g<1>{args.version}\3",
         text,
         count=1,
     )

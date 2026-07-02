@@ -6,22 +6,30 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use clap::ArgGroup;
+use codex_config::types::AppToolApproval;
+use codex_config::types::McpServerConfig;
+use codex_config::types::McpServerOAuthConfig;
+use codex_config::types::McpServerTransportConfig;
+use codex_core::McpManager;
 use codex_core::config::Config;
+use codex_core::config::ConfigBuilder;
+use codex_core::config::LoaderOverrides;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::find_codex_home;
 use codex_core::config::load_global_mcp_servers;
-use codex_core::config::types::McpServerConfig;
-use codex_core::config::types::McpServerTransportConfig;
-use codex_core::mcp::McpManager;
-use codex_core::mcp::auth::McpOAuthLoginSupport;
-use codex_core::mcp::auth::compute_auth_statuses;
-use codex_core::mcp::auth::oauth_login_support;
-use codex_core::plugins::PluginsManager;
+use codex_core_plugins::PluginsManager;
+use codex_mcp::McpOAuthLoginSupport;
+use codex_mcp::ResolvedMcpOAuthScopes;
+use codex_mcp::compute_auth_statuses;
+use codex_mcp::discover_supported_scopes;
+use codex_mcp::oauth_login_support;
+use codex_mcp::resolve_oauth_scopes;
+use codex_mcp::should_retry_without_scopes;
 use codex_protocol::protocol::McpAuthStatus;
 use codex_rmcp_client::delete_oauth_tokens;
 use codex_rmcp_client::perform_oauth_login;
 use codex_utils_cli::CliConfigOverrides;
-use codex_utils_cli::format_env_display::format_env_display;
+use codex_utils_cli::format_env_display;
 
 /// Subcommands:
 /// - `list`   — list configured servers (with `--json`)
@@ -127,6 +135,14 @@ pub struct AddMcpStreamableHttpArgs {
         requires = "url"
     )]
     pub bearer_token_env_var: Option<String>,
+
+    /// Optional OAuth client identifier to use for this MCP server.
+    #[arg(long = "oauth-client-id", value_name = "CLIENT_ID", requires = "url")]
+    pub oauth_client_id: Option<String>,
+
+    /// Optional OAuth resource parameter to include during MCP login.
+    #[arg(long = "oauth-resource", value_name = "RESOURCE", requires = "url")]
+    pub oauth_resource: Option<String>,
 }
 
 #[derive(Debug, clap::Parser)]
@@ -152,11 +168,15 @@ pub struct LogoutArgs {
 }
 
 impl McpCli {
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(self, loader_overrides: LoaderOverrides) -> Result<()> {
         let McpCli {
             config_overrides,
             subcommand,
         } = self;
+
+        if loader_overrides.user_config_profile.is_some() {
+            validate_profile_v2_migration(&config_overrides, loader_overrides).await?;
+        }
 
         match subcommand {
             McpSubcommand::List(args) => {
@@ -183,6 +203,73 @@ impl McpCli {
     }
 }
 
+/// Preserve compatibility with servers that still expect the legacy empty-scope
+/// OAuth request. If a discovered-scope request is rejected by the provider,
+/// retry the login flow once without scopes.
+#[allow(clippy::too_many_arguments)]
+async fn perform_oauth_login_retry_without_scopes(
+    name: &str,
+    url: &str,
+    store_mode: codex_config::types::OAuthCredentialsStoreMode,
+    http_headers: Option<HashMap<String, String>>,
+    env_http_headers: Option<HashMap<String, String>>,
+    resolved_scopes: &ResolvedMcpOAuthScopes,
+    oauth_client_id: Option<&str>,
+    oauth_resource: Option<&str>,
+    callback_port: Option<u16>,
+    callback_url: Option<&str>,
+) -> Result<()> {
+    match perform_oauth_login(
+        name,
+        url,
+        store_mode,
+        http_headers.clone(),
+        env_http_headers.clone(),
+        &resolved_scopes.scopes,
+        oauth_client_id,
+        oauth_resource,
+        callback_port,
+        callback_url,
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(err) if should_retry_without_scopes(resolved_scopes, &err) => {
+            println!("OAuth provider rejected discovered scopes. Retrying without scopes…");
+            perform_oauth_login(
+                name,
+                url,
+                store_mode,
+                http_headers,
+                env_http_headers,
+                &[],
+                oauth_client_id,
+                oauth_resource,
+                callback_port,
+                callback_url,
+            )
+            .await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn validate_profile_v2_migration(
+    config_overrides: &CliConfigOverrides,
+    loader_overrides: LoaderOverrides,
+) -> Result<()> {
+    let overrides = config_overrides
+        .parse_overrides()
+        .map_err(anyhow::Error::msg)?;
+    ConfigBuilder::default()
+        .cli_overrides(overrides)
+        .loader_overrides(loader_overrides)
+        .build()
+        .await
+        .context("failed to load configuration")?;
+    Ok(())
+}
+
 async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Result<()> {
     // Validate any provided overrides even though they are not currently applied.
     let overrides = config_overrides
@@ -204,7 +291,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         .await
         .with_context(|| format!("failed to load MCP servers from {}", codex_home.display()))?;
 
-    let transport = match transport_args {
+    let (transport, oauth_client_id, oauth_resource) = match transport_args {
         AddMcpTransportArgs {
             stdio: Some(stdio), ..
         } => {
@@ -219,41 +306,60 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
             } else {
                 Some(stdio.env.into_iter().collect::<HashMap<_, _>>())
             };
-            McpServerTransportConfig::Stdio {
-                command: command_bin,
-                args: command_args,
-                env: env_map,
-                env_vars: Vec::new(),
-                cwd: None,
-            }
+            (
+                McpServerTransportConfig::Stdio {
+                    command: command_bin,
+                    args: command_args,
+                    env: env_map,
+                    env_vars: Vec::new(),
+                    cwd: None,
+                },
+                None,
+                None,
+            )
         }
         AddMcpTransportArgs {
             streamable_http:
                 Some(AddMcpStreamableHttpArgs {
                     url,
                     bearer_token_env_var,
+                    oauth_client_id,
+                    oauth_resource,
                 }),
             ..
-        } => McpServerTransportConfig::StreamableHttp {
-            url,
-            bearer_token_env_var,
-            http_headers: None,
-            env_http_headers: None,
-        },
+        } => (
+            McpServerTransportConfig::StreamableHttp {
+                url,
+                bearer_token_env_var,
+                http_headers: None,
+                env_http_headers: None,
+            },
+            oauth_client_id,
+            oauth_resource,
+        ),
         AddMcpTransportArgs { .. } => bail!("exactly one of --command or --url must be provided"),
     };
 
     let new_entry = McpServerConfig {
         transport: transport.clone(),
+        environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
         enabled: true,
         required: false,
+        supports_parallel_tool_calls: false,
         disabled_reason: None,
         startup_timeout_sec: None,
         tool_timeout_sec: None,
+        default_tools_approval_mode: None,
         enabled_tools: None,
         disabled_tools: None,
         scopes: None,
-        oauth_resource: None,
+        oauth: oauth_client_id
+            .clone()
+            .map(|client_id| McpServerOAuthConfig {
+                client_id: Some(client_id),
+            }),
+        oauth_resource: oauth_resource.clone(),
+        tools: HashMap::new(),
     };
 
     servers.insert(name.clone(), new_entry);
@@ -269,14 +375,20 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
     match oauth_login_support(&transport).await {
         McpOAuthLoginSupport::Supported(oauth_config) => {
             println!("Detected OAuth support. Starting OAuth flow…");
-            perform_oauth_login(
+            let resolved_scopes = resolve_oauth_scopes(
+                /*explicit_scopes*/ None,
+                /*configured_scopes*/ None,
+                oauth_config.discovered_scopes.clone(),
+            );
+            perform_oauth_login_retry_without_scopes(
                 &name,
                 &oauth_config.url,
                 config.mcp_oauth_credentials_store_mode,
                 oauth_config.http_headers,
                 oauth_config.env_http_headers,
-                &Vec::new(),
-                None,
+                &resolved_scopes,
+                oauth_client_id.as_deref(),
+                oauth_resource.as_deref(),
                 config.mcp_oauth_callback_port,
                 config.mcp_oauth_callback_url.as_deref(),
             )
@@ -332,8 +444,10 @@ async fn run_login(config_overrides: &CliConfigOverrides, login_args: LoginArgs)
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
-    let mcp_manager = McpManager::new(Arc::new(PluginsManager::new(config.codex_home.clone())));
-    let mcp_servers = mcp_manager.effective_servers(&config, None);
+    let mcp_manager = McpManager::new(Arc::new(PluginsManager::new(
+        config.codex_home.to_path_buf(),
+    )));
+    let mcp_servers = mcp_manager.configured_servers(&config).await;
 
     let LoginArgs { name, scopes } = login_args;
 
@@ -351,18 +465,23 @@ async fn run_login(config_overrides: &CliConfigOverrides, login_args: LoginArgs)
         _ => bail!("OAuth login is only supported for streamable HTTP servers."),
     };
 
-    let mut scopes = scopes;
-    if scopes.is_empty() {
-        scopes = server.scopes.clone().unwrap_or_default();
-    }
+    let explicit_scopes = (!scopes.is_empty()).then_some(scopes);
+    let discovered_scopes = if explicit_scopes.is_none() && server.scopes.is_none() {
+        discover_supported_scopes(&server.transport).await
+    } else {
+        None
+    };
+    let resolved_scopes =
+        resolve_oauth_scopes(explicit_scopes, server.scopes.clone(), discovered_scopes);
 
-    perform_oauth_login(
+    perform_oauth_login_retry_without_scopes(
         &name,
         &url,
         config.mcp_oauth_credentials_store_mode,
         http_headers,
         env_http_headers,
-        &scopes,
+        &resolved_scopes,
+        server.oauth_client_id(),
         server.oauth_resource.as_deref(),
         config.mcp_oauth_callback_port,
         config.mcp_oauth_callback_url.as_deref(),
@@ -379,8 +498,10 @@ async fn run_logout(config_overrides: &CliConfigOverrides, logout_args: LogoutAr
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
-    let mcp_manager = McpManager::new(Arc::new(PluginsManager::new(config.codex_home.clone())));
-    let mcp_servers = mcp_manager.effective_servers(&config, None);
+    let mcp_manager = McpManager::new(Arc::new(PluginsManager::new(
+        config.codex_home.to_path_buf(),
+    )));
+    let mcp_servers = mcp_manager.configured_servers(&config).await;
 
     let LogoutArgs { name } = logout_args;
 
@@ -409,13 +530,20 @@ async fn run_list(config_overrides: &CliConfigOverrides, list_args: ListArgs) ->
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
-    let mcp_manager = McpManager::new(Arc::new(PluginsManager::new(config.codex_home.clone())));
-    let mcp_servers = mcp_manager.effective_servers(&config, None);
+    let mcp_manager = McpManager::new(Arc::new(PluginsManager::new(
+        config.codex_home.to_path_buf(),
+    )));
+    let mcp_servers = mcp_manager.configured_servers(&config).await;
+    let effective_mcp_servers = mcp_manager.effective_servers(&config, /*auth*/ None).await;
 
     let mut entries: Vec<_> = mcp_servers.iter().collect();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-    let auth_statuses =
-        compute_auth_statuses(mcp_servers.iter(), config.mcp_oauth_credentials_store_mode).await;
+    entries.sort_by_key(|(name, _)| *name);
+    let auth_statuses = compute_auth_statuses(
+        effective_mcp_servers.iter(),
+        config.mcp_oauth_credentials_store_mode,
+        /*auth*/ None,
+    )
+    .await;
 
     if list_args.json {
         let json_entries: Vec<_> = entries
@@ -658,8 +786,10 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
-    let mcp_manager = McpManager::new(Arc::new(PluginsManager::new(config.codex_home.clone())));
-    let mcp_servers = mcp_manager.effective_servers(&config, None);
+    let mcp_manager = McpManager::new(Arc::new(PluginsManager::new(
+        config.codex_home.to_path_buf(),
+    )));
+    let mcp_servers = mcp_manager.configured_servers(&config).await;
 
     let Some(server) = mcp_servers.get(&get_args.name) else {
         bail!("No MCP server named '{name}' found.", name = get_args.name);
@@ -776,7 +906,7 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
             let headers_display = match http_headers {
                 Some(map) if !map.is_empty() => {
                     let mut pairs: Vec<_> = map.iter().collect();
-                    pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+                    pairs.sort_by_key(|(name, _)| *name);
                     pairs
                         .into_iter()
                         .map(|(k, _)| format!("{k}=*****"))
@@ -789,7 +919,7 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
             let env_headers_display = match env_http_headers {
                 Some(map) if !map.is_empty() => {
                     let mut pairs: Vec<_> = map.iter().collect();
-                    pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+                    pairs.sort_by_key(|(name, _)| *name);
                     pairs
                         .into_iter()
                         .map(|(k, var)| format!("{k}={var}"))
@@ -807,7 +937,15 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
     if let Some(timeout) = server.tool_timeout_sec {
         println!("  tool_timeout_sec: {}", timeout.as_secs_f64());
     }
-    println!("  remove: rolodex mcp remove {}", get_args.name);
+    if let Some(approval_mode) = server.default_tools_approval_mode {
+        let approval_mode = match approval_mode {
+            AppToolApproval::Auto => "auto",
+            AppToolApproval::Prompt => "prompt",
+            AppToolApproval::Approve => "approve",
+        };
+        println!("  default_tools_approval_mode: {approval_mode}");
+    }
+    println!("  remove: codex mcp remove {}", get_args.name);
 
     Ok(())
 }

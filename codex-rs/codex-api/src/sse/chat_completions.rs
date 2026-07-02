@@ -123,6 +123,11 @@ pub fn spawn_chat_completions_stream(
     turn_state: Option<Arc<OnceLock<String>>>,
 ) -> ResponseStream {
     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
+    let upstream_request_id = stream_response
+        .headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     if let Some(turn_state) = turn_state.as_ref()
         && let Some(header_value) = stream_response
             .headers
@@ -146,7 +151,10 @@ pub fn spawn_chat_completions_stream(
         process_chat_sse(stream_response.bytes, tx_event, idle_timeout, telemetry).await;
     });
 
-    ResponseStream { rx_event }
+    ResponseStream {
+        rx_event,
+        upstream_request_id,
+    }
 }
 
 async fn process_chat_sse(
@@ -316,7 +324,6 @@ async fn ensure_assistant_message_started(
             id: None,
             role: "assistant".to_string(),
             content: Vec::new(),
-            end_turn: None,
             phase: None,
         })))
         .await
@@ -361,7 +368,6 @@ async fn flush_assistant_message(
         content: vec![ContentItem::OutputText {
             text: std::mem::take(&mut state.assistant_text),
         }],
-        end_turn: None,
         phase: None,
     };
     state.assistant_message_open = false;
@@ -385,6 +391,7 @@ async fn flush_tool_calls(
             name: tool_call
                 .name
                 .ok_or_else(|| ApiError::Stream("tool call missing name".to_string()))?,
+            namespace: None,
             arguments: tool_call.arguments,
             call_id: tool_call
                 .id
@@ -413,6 +420,7 @@ async fn flush_and_complete(
                 .clone()
                 .unwrap_or_else(|| "chat-compat".to_string()),
             token_usage: state.token_usage.clone(),
+            end_turn: None,
         }))
         .await
         .map_err(|_| {
@@ -519,7 +527,8 @@ mod tests {
             &events[7],
             ResponseEvent::Completed {
                 response_id,
-                token_usage
+                token_usage,
+                ..
             } if response_id == "chatcmpl-1" && token_usage.is_none()
         ));
     }
@@ -549,6 +558,7 @@ mod tests {
                 name,
                 arguments,
                 call_id,
+                ..
             }) if id.is_none()
                 && name == "exec_command"
                 && arguments == "{\"cmd\":\"echo hi\"}"
@@ -565,6 +575,7 @@ mod tests {
                     reasoning_output_tokens: 0,
                     total_tokens: 12,
                 }),
+                ..
             } if response_id == "chatcmpl-2"
         ));
     }
@@ -602,7 +613,8 @@ mod tests {
             &events[5],
             ResponseEvent::Completed {
                 response_id,
-                token_usage
+                token_usage,
+                ..
             } if response_id == "chatcmpl-3" && token_usage.is_none()
         ));
     }
