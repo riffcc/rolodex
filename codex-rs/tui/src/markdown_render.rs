@@ -95,6 +95,8 @@ struct MarkdownStyles {
     emphasis: Style,
     strong: Style,
     strikethrough: Style,
+    math: Style,
+    display_math: Style,
     ordered_list_marker: Style,
     unordered_list_marker: Style,
     link: Style,
@@ -114,6 +116,8 @@ impl Default for MarkdownStyles {
             emphasis: Style::new().italic(),
             strong: Style::new().bold(),
             strikethrough: Style::new().crossed_out(),
+            math: Style::new().magenta().italic(),
+            display_math: Style::new().magenta().bold(),
             ordered_list_marker: Style::new().light_blue(),
             unordered_list_marker: Style::new(),
             link: Style::new().cyan().underlined(),
@@ -359,6 +363,127 @@ static HASH_LOCATION_SUFFIX_RE: LazyLock<Regex> =
         Err(error) => panic!("invalid hash location regex: {error}"),
     });
 
+#[derive(Debug, PartialEq, Eq)]
+enum MathTextSegment<'a> {
+    Text(&'a str),
+    Math(&'a str),
+}
+
+fn split_inline_math(text: &str) -> Vec<MathTextSegment<'_>> {
+    let mut segments = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(open) = find_unescaped_dollar(text, cursor) {
+        if open > cursor {
+            segments.push(MathTextSegment::Text(&text[cursor..open]));
+        }
+        let math_start = open + 1;
+        let Some(close) = find_unescaped_dollar(text, math_start) else {
+            segments.push(MathTextSegment::Text(&text[open..]));
+            return segments;
+        };
+        if close == math_start {
+            segments.push(MathTextSegment::Text(&text[open..=close]));
+        } else {
+            segments.push(MathTextSegment::Math(&text[math_start..close]));
+        }
+        cursor = close + 1;
+    }
+    if cursor < text.len() || segments.is_empty() {
+        segments.push(MathTextSegment::Text(&text[cursor..]));
+    }
+    segments
+}
+
+fn find_unescaped_dollar(text: &str, start: usize) -> Option<usize> {
+    text[start..].char_indices().find_map(|(offset, ch)| {
+        let index = start + offset;
+        (ch == '$' && !is_escaped(text, index)).then_some(index)
+    })
+}
+
+fn is_escaped(text: &str, index: usize) -> bool {
+    text.as_bytes()[..index]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count()
+        % 2
+        == 1
+}
+
+fn render_math_text(math: &str) -> String {
+    let mut rendered = math.trim().to_string();
+    for (latex, symbol) in LATEX_SYMBOLS {
+        rendered = rendered.replace(latex, symbol);
+    }
+    rendered
+        .replace("\\left", "")
+        .replace("\\right", "")
+        .replace("\\,", " ")
+        .replace("\\;", " ")
+        .replace("\\:", " ")
+        .replace("\\!", "")
+}
+
+const LATEX_SYMBOLS: &[(&str, &str)] = &[
+    ("\\alpha", "α"),
+    ("\\beta", "β"),
+    ("\\gamma", "γ"),
+    ("\\delta", "δ"),
+    ("\\epsilon", "ε"),
+    ("\\theta", "θ"),
+    ("\\lambda", "λ"),
+    ("\\mu", "μ"),
+    ("\\pi", "π"),
+    ("\\rho", "ρ"),
+    ("\\sigma", "σ"),
+    ("\\tau", "τ"),
+    ("\\phi", "φ"),
+    ("\\omega", "ω"),
+    ("\\Gamma", "Γ"),
+    ("\\Delta", "Δ"),
+    ("\\Theta", "Θ"),
+    ("\\Lambda", "Λ"),
+    ("\\Pi", "Π"),
+    ("\\Sigma", "Σ"),
+    ("\\Phi", "Φ"),
+    ("\\Omega", "Ω"),
+    ("\\times", "×"),
+    ("\\cdot", "·"),
+    ("\\pm", "±"),
+    ("\\mp", "∓"),
+    ("\\leq", "≤"),
+    ("\\le", "≤"),
+    ("\\geq", "≥"),
+    ("\\ge", "≥"),
+    ("\\neq", "≠"),
+    ("\\approx", "≈"),
+    ("\\infty", "∞"),
+    ("\\rightarrow", "→"),
+    ("\\leftarrow", "←"),
+    ("\\to", "→"),
+    ("\\Rightarrow", "⇒"),
+    ("\\Leftarrow", "⇐"),
+    ("\\iff", "⇔"),
+    ("\\in", "∈"),
+    ("\\notin", "∉"),
+    ("\\subseteq", "⊆"),
+    ("\\subset", "⊂"),
+    ("\\cup", "∪"),
+    ("\\cap", "∩"),
+    ("\\forall", "∀"),
+    ("\\exists", "∃"),
+    ("\\neg", "¬"),
+    ("\\land", "∧"),
+    ("\\lor", "∨"),
+    ("\\sum", "∑"),
+    ("\\prod", "∏"),
+    ("\\int", "∫"),
+    ("\\sqrt", "√"),
+    ("\\partial", "∂"),
+    ("\\nabla", "∇"),
+];
+
 /// Stateful pulldown-cmark event consumer that builds styled `ratatui` output.
 ///
 /// Tracks inline style nesting, indent/blockquote context, list numbering,
@@ -383,6 +508,7 @@ where
     pending_marker_line: bool,
     in_paragraph: bool,
     in_code_block: bool,
+    in_display_math: bool,
     code_block_lang: Option<String>,
     code_block_buffer: String,
     wrap_width: Option<usize>,
@@ -417,6 +543,7 @@ where
             pending_marker_line: false,
             in_paragraph: false,
             in_code_block: false,
+            in_display_math: false,
             code_block_lang: None,
             code_block_buffer: String::new(),
             wrap_width,
@@ -658,6 +785,11 @@ where
             }
         }
         for (i, line) in text.lines().enumerate() {
+            let content = line.to_string();
+            if self.handle_display_math_line(&content) {
+                self.needs_newline = false;
+                continue;
+            }
             if self.needs_newline {
                 self.push_line(Line::default());
                 self.needs_newline = false;
@@ -665,9 +797,8 @@ where
             if i > 0 {
                 self.push_line(Line::default());
             }
-            let content = line.to_string();
             let style = self.inline_styles.last().copied().unwrap_or_default();
-            self.push_text_spans(&content, style);
+            self.push_text_spans_with_math(&content, style);
         }
         self.needs_newline = false;
     }
@@ -727,6 +858,9 @@ where
         if self.suppressing_local_link_label() {
             return;
         }
+        if self.in_display_math {
+            return;
+        }
         self.line_ends_with_local_link_target = false;
         if self.in_table_cell() {
             self.push_table_cell_hard_break();
@@ -737,6 +871,9 @@ where
 
     fn soft_break(&mut self) {
         if self.suppressing_local_link_label() {
+            return;
+        }
+        if self.in_display_math {
             return;
         }
         if self.in_table_cell() {
@@ -1015,7 +1152,7 @@ where
             if i > 0 {
                 self.push_table_cell_hard_break();
             }
-            self.push_text_spans_to_table_cell(line, style);
+            self.push_text_spans_to_table_cell_with_math(line, style);
         }
     }
 
@@ -1039,6 +1176,77 @@ where
         {
             cell.push_annotated(std::mem::take(&mut annotated));
         }
+    }
+
+    fn push_text_spans_to_table_cell_with_math(&mut self, text: &str, style: Style) {
+        if self.link.is_some() || self.in_code_block {
+            self.push_text_spans_to_table_cell(text, style);
+            return;
+        }
+
+        for segment in split_inline_math(text) {
+            match segment {
+                MathTextSegment::Text(text) => self.push_text_spans_to_table_cell(text, style),
+                MathTextSegment::Math(math) => {
+                    self.push_span_to_table_cell(Span::styled(
+                        render_math_text(math),
+                        self.styles.math,
+                    ));
+                }
+            }
+        }
+    }
+
+    fn handle_display_math_line(&mut self, line: &str) -> bool {
+        if self.link.is_some() || self.in_code_block || self.in_table_cell() {
+            return false;
+        }
+
+        let trimmed = line.trim();
+        if self.in_display_math {
+            if trimmed == "$$" {
+                self.in_display_math = false;
+                self.needs_newline = true;
+            } else {
+                self.push_display_math_line(trimmed);
+            }
+            return true;
+        }
+
+        if trimmed == "$$" {
+            if self.needs_newline {
+                self.push_blank_line();
+                self.needs_newline = false;
+            }
+            self.flush_current_line();
+            self.in_display_math = true;
+            return true;
+        }
+
+        if let Some(math) = trimmed
+            .strip_prefix("$$")
+            .and_then(|rest| rest.strip_suffix("$$"))
+            .filter(|math| !math.trim().is_empty())
+        {
+            if self.needs_newline {
+                self.push_blank_line();
+                self.needs_newline = false;
+            }
+            self.push_display_math_line(math.trim());
+            self.needs_newline = true;
+            return true;
+        }
+
+        false
+    }
+
+    fn push_display_math_line(&mut self, math: &str) {
+        self.flush_current_line();
+        self.push_line(Line::from(Span::styled(
+            render_math_text(math),
+            self.styles.display_math,
+        )));
+        self.flush_current_line();
     }
 
     /// Convert a completed `TableState` into styled table `Line`s.
@@ -1939,6 +2147,22 @@ where
             annotate_web_urls_in_line(Line::from(span))
         };
         self.push_annotated(annotated);
+    }
+
+    fn push_text_spans_with_math(&mut self, text: &str, style: Style) {
+        if self.link.is_some() || self.in_code_block {
+            self.push_text_spans(text, style);
+            return;
+        }
+
+        for segment in split_inline_math(text) {
+            match segment {
+                MathTextSegment::Text(text) => self.push_text_spans(text, style),
+                MathTextSegment::Math(math) => {
+                    self.push_span(Span::styled(render_math_text(math), self.styles.math));
+                }
+            }
+        }
     }
 
     fn push_blank_line(&mut self) {

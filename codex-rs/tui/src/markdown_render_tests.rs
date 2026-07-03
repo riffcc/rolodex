@@ -1,4 +1,5 @@
 use pretty_assertions::assert_eq;
+use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
@@ -144,6 +145,37 @@ fn paragraph_multiple() {
         render_markdown_text("Paragraph 1\n\nParagraph 2"),
         Text::from_iter(["Paragraph 1", "", "Paragraph 2"])
     );
+}
+
+#[test]
+fn inline_latex_math_renders_as_styled_math_text() {
+    let text = render_markdown_text("Euler gives $e^{i\\pi}+1=0$.");
+
+    assert_eq!(plain_lines(&text), vec!["Euler gives e^{iπ}+1=0."]);
+    let math_span = text.lines[0]
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == "e^{iπ}+1=0")
+        .expect("math span should render separately");
+    assert_eq!(math_span.style.fg, Some(Color::Magenta));
+    assert!(math_span.style.add_modifier.contains(Modifier::ITALIC));
+}
+
+#[test]
+fn display_latex_math_block_renders_without_delimiters() {
+    let text = render_markdown_text("Before\n\n$$\n\\sum_{i=1}^n i\n$$\n\nAfter");
+
+    assert_eq!(
+        plain_lines(&text),
+        vec!["Before", "", "", "∑_{i=1}^n i", "", "After"]
+    );
+    let math_span = text.lines[3]
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == "∑_{i=1}^n i")
+        .expect("display math span should render separately");
+    assert_eq!(math_span.style.fg, Some(Color::Magenta));
+    assert!(math_span.style.add_modifier.contains(Modifier::BOLD));
 }
 
 #[test]
