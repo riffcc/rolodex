@@ -671,6 +671,10 @@ pub(crate) fn new_mcp_inventory_loading(animations_enabled: bool) -> McpInventor
     McpInventoryLoadingCell::new(animations_enabled)
 }
 fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
+    if let Some(smart_tool) = format_smart_tool_invocation(&invocation) {
+        return smart_tool;
+    }
+
     let args_str = invocation
         .arguments
         .as_ref()
@@ -689,4 +693,65 @@ fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
         ")".into(),
     ];
     invocation_spans.into()
+}
+
+fn format_smart_tool_invocation(invocation: &McpInvocation) -> Option<Line<'static>> {
+    let tool = invocation.tool.as_str();
+    let title = match tool {
+        "smart_read" => "SmartRead",
+        "smart_search" | "mr_search" => "SmartSearch",
+        "smart_write" => "SmartWrite",
+        "ask_code" => "AskCode",
+        "examples" | "examples_tool" => "Examples",
+        _ => return None,
+    };
+    let args = invocation.arguments.as_ref();
+    let summary = match tool {
+        "smart_read" => smart_arg(args, "path")
+            .or_else(|| smart_arg(args, "target"))
+            .or_else(|| smart_arg(args, "symbol"))
+            .unwrap_or_else(|| smart_args_fallback(args)),
+        "smart_search" | "mr_search" | "ask_code" | "examples" | "examples_tool" => {
+            smart_arg(args, "query")
+                .or_else(|| smart_arg(args, "question"))
+                .unwrap_or_else(|| smart_args_fallback(args))
+        }
+        "smart_write" => {
+            let path = smart_arg(args, "path");
+            let operation = smart_arg(args, "operation");
+            match (operation, path) {
+                (Some(operation), Some(path)) => format!("{operation} {path}"),
+                (None, Some(path)) => path,
+                (Some(operation), None) => operation,
+                (None, None) => smart_args_fallback(args),
+            }
+        }
+        _ => smart_args_fallback(args),
+    };
+
+    let mut spans = vec![title.cyan()];
+    if !summary.is_empty() {
+        spans.push(" ".into());
+        spans.push(summary.dim());
+    }
+    if let Some(layer) = smart_arg(args, "layer")
+        && !layer.is_empty()
+    {
+        spans.push(" (".dim());
+        spans.push(layer.dim());
+        spans.push(")".dim());
+    }
+    Some(Line::from(spans))
+}
+
+fn smart_arg(args: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    args.and_then(|value| value.get(key))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn smart_args_fallback(args: Option<&serde_json::Value>) -> String {
+    args.map(|value| serde_json::to_string(value).unwrap_or_else(|_| value.to_string()))
+        .unwrap_or_default()
 }
