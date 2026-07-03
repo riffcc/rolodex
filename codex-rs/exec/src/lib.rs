@@ -211,8 +211,36 @@ struct ExecRunArgs {
     oss: bool,
     output_schema_path: Option<PathBuf>,
     prompt: Option<String>,
+    resume_model_overrides: ResumeModelOverrides,
     skip_git_repo_check: bool,
     stderr_with_ansi: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ResumeOverrideSources {
+    model: bool,
+    model_provider: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ResumeModelOverrides {
+    model: Option<String>,
+    model_provider: Option<String>,
+}
+
+impl ResumeModelOverrides {
+    fn from_config(config: &Config, sources: ResumeOverrideSources) -> Self {
+        Self {
+            model: if sources.model {
+                config.model.clone()
+            } else {
+                None
+            },
+            model_provider: sources
+                .model_provider
+                .then(|| config.model_provider_id.clone()),
+        }
+    }
 }
 
 fn exec_root_span() -> tracing::Span {
@@ -302,6 +330,10 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             std::process::exit(1);
         }
     };
+    let model_cli_arg_explicit = model_cli_arg.is_some();
+    let model_config_override_explicit = cli_override_contains_key(&cli_kv_overrides, "model");
+    let model_provider_config_override_explicit =
+        cli_override_contains_key(&cli_kv_overrides, "model_provider");
 
     let resolved_cwd = cwd.clone();
     let config_cwd = match resolved_cwd.as_deref() {
@@ -552,6 +584,13 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         opt_out_notification_methods: Vec::new(),
         channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     };
+    let resume_model_overrides = ResumeModelOverrides::from_config(
+        &config,
+        ResumeOverrideSources {
+            model: model_cli_arg_explicit || model_config_override_explicit || oss,
+            model_provider: model_provider.is_some() || model_provider_config_override_explicit,
+        },
+    );
     run_exec_session(ExecRunArgs {
         in_process_start_args,
         state_db,
@@ -566,6 +605,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         oss,
         output_schema_path,
         prompt,
+        resume_model_overrides,
         skip_git_repo_check,
         stderr_with_ansi,
     })
@@ -648,6 +688,15 @@ async fn load_config_toml_or_exit(
     }
 }
 
+fn cli_override_contains_key(
+    cli_kv_overrides: &[(String, codex_config::TomlValue)],
+    key: &str,
+) -> bool {
+    cli_kv_overrides
+        .iter()
+        .any(|(override_key, _)| override_key == key)
+}
+
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let ExecRunArgs {
         in_process_start_args,
@@ -663,6 +712,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         oss,
         output_schema_path,
         prompt,
+        resume_model_overrides,
         skip_git_repo_check,
         stderr_with_ansi,
     } = args;
@@ -785,7 +835,11 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 &client,
                 ClientRequest::ThreadResume {
                     request_id: request_ids.next(),
-                    params: thread_resume_params_from_config(&config, thread_id),
+                    params: thread_resume_params_from_config(
+                        &config,
+                        thread_id,
+                        &resume_model_overrides,
+                    ),
                 },
                 "thread/resume",
             )
@@ -1056,7 +1110,11 @@ fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {
     }
 }
 
-fn thread_resume_params_from_config(config: &Config, thread_id: String) -> ThreadResumeParams {
+fn thread_resume_params_from_config(
+    config: &Config,
+    thread_id: String,
+    resume_model_overrides: &ResumeModelOverrides,
+) -> ThreadResumeParams {
     let permissions = permissions_selection_from_config(config);
     let sandbox = permissions.is_none().then(|| {
         sandbox_mode_from_permission_profile(
@@ -1066,8 +1124,8 @@ fn thread_resume_params_from_config(config: &Config, thread_id: String) -> Threa
     });
     ThreadResumeParams {
         thread_id,
-        model: config.model.clone(),
-        model_provider: Some(config.model_provider_id.clone()),
+        model: resume_model_overrides.model.clone(),
+        model_provider: resume_model_overrides.model_provider.clone(),
         cwd: Some(config.cwd.to_string_lossy().to_string()),
         runtime_workspace_roots: Some(config.workspace_roots.clone()),
         approval_policy: Some(config.permissions.approval_policy.value().into()),

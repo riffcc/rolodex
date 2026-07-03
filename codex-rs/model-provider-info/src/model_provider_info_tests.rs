@@ -291,7 +291,7 @@ fn test_create_cerebras_provider() {
             base_url: Some("https://api.cerebras.ai/v1".to_string()),
             env_key: Some("CEREBRAS_API_KEY".to_string()),
             env_key_instructions: Some(
-                "Create a Cerebras API key at https://cloud.cerebras.ai and set CEREBRAS_API_KEY."
+                "Create a Cerebras API key at https://cloud.cerebras.ai and set CEREBRAS_API_KEY or CEREBRAS_API_TOKEN."
                     .to_string(),
             ),
             experimental_bearer_token: None,
@@ -308,6 +308,36 @@ fn test_create_cerebras_provider() {
             requires_openai_auth: false,
             supports_websockets: false,
         }
+    );
+}
+
+#[test]
+fn cerebras_provider_accepts_token_env_alias() {
+    let provider = ModelProviderInfo::create_cerebras_provider();
+
+    assert_eq!(
+        provider
+            .api_key_with_env(|name| {
+                (name == CEREBRAS_API_TOKEN_ENV_VAR).then_some("token-value".to_string())
+            })
+            .expect("token alias should resolve"),
+        Some("token-value".to_string())
+    );
+}
+
+#[test]
+fn cerebras_provider_prefers_canonical_api_key_env() {
+    let provider = ModelProviderInfo::create_cerebras_provider();
+
+    assert_eq!(
+        provider
+            .api_key_with_env(|name| match name {
+                CEREBRAS_API_KEY_ENV_VAR => Some("key-value".to_string()),
+                CEREBRAS_API_TOKEN_ENV_VAR => Some("token-value".to_string()),
+                _ => None,
+            })
+            .expect("canonical key should resolve"),
+        Some("key-value".to_string())
     );
 }
 

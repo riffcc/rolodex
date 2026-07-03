@@ -47,6 +47,7 @@ const CEREBRAS_PROVIDER_NAME: &str = "Cerebras";
 pub const CEREBRAS_PROVIDER_ID: &str = "cerebras";
 pub const CEREBRAS_DEFAULT_BASE_URL: &str = "https://api.cerebras.ai/v1";
 pub const CEREBRAS_API_KEY_ENV_VAR: &str = "CEREBRAS_API_KEY";
+pub const CEREBRAS_API_TOKEN_ENV_VAR: &str = "CEREBRAS_API_TOKEN";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
@@ -296,20 +297,34 @@ impl ModelProviderInfo {
     /// (and non-empty) in the environment. If `env_key` is required but
     /// cannot be found, returns an error.
     pub fn api_key(&self) -> CodexResult<Option<String>> {
+        self.api_key_with_env(|name| std::env::var(name).ok())
+    }
+
+    fn api_key_with_env(
+        &self,
+        get_env: impl Fn(&str) -> Option<String>,
+    ) -> CodexResult<Option<String>> {
         match &self.env_key {
             Some(env_key) => {
-                let api_key = std::env::var(env_key)
-                    .ok()
-                    .filter(|v| !v.trim().is_empty())
-                    .ok_or_else(|| {
-                        CodexErr::EnvVar(EnvVarError {
-                            var: env_key.clone(),
-                            instructions: self.env_key_instructions.clone(),
-                        })
-                    })?;
-                Ok(Some(api_key))
+                for key in Self::api_key_env_keys(env_key) {
+                    if let Some(api_key) = get_env(key).filter(|value| !value.trim().is_empty()) {
+                        return Ok(Some(api_key));
+                    }
+                }
+                Err(CodexErr::EnvVar(EnvVarError {
+                    var: env_key.clone(),
+                    instructions: self.env_key_instructions.clone(),
+                }))
             }
             None => Ok(None),
+        }
+    }
+
+    fn api_key_env_keys(env_key: &str) -> Vec<&str> {
+        if env_key == CEREBRAS_API_KEY_ENV_VAR {
+            vec![env_key, CEREBRAS_API_TOKEN_ENV_VAR]
+        } else {
+            vec![env_key]
         }
     }
 
@@ -414,7 +429,7 @@ impl ModelProviderInfo {
             base_url: Some(CEREBRAS_DEFAULT_BASE_URL.into()),
             env_key: Some(CEREBRAS_API_KEY_ENV_VAR.into()),
             env_key_instructions: Some(
-                "Create a Cerebras API key at https://cloud.cerebras.ai and set CEREBRAS_API_KEY."
+                "Create a Cerebras API key at https://cloud.cerebras.ai and set CEREBRAS_API_KEY or CEREBRAS_API_TOKEN."
                     .to_string(),
             ),
             experimental_bearer_token: None,

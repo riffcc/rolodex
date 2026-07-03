@@ -27,6 +27,20 @@ fn leaves_models_unchanged_without_cerebras_api_key() {
 }
 
 #[test]
+fn detects_cerebras_api_token_alias() {
+    assert!(cerebras_api_key_available_with_env(|name| {
+        (name == CEREBRAS_API_TOKEN_ENV_VAR).then_some("token".to_string())
+    }));
+}
+
+#[test]
+fn ignores_empty_cerebras_api_token_alias() {
+    assert!(!cerebras_api_key_available_with_env(|name| {
+        (name == CEREBRAS_API_TOKEN_ENV_VAR).then_some("   ".to_string())
+    }));
+}
+
+#[test]
 fn does_not_duplicate_existing_gemma4_entry() {
     let mut models = vec![gemma4_model_info()];
 
