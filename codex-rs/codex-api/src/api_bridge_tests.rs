@@ -115,13 +115,63 @@ fn map_api_error_keeps_unknown_400_errors_generic() {
         status: http::StatusCode::BAD_REQUEST,
         url: Some("http://example.com/v1/responses".to_string()),
         headers: None,
-        body: Some(body.clone()),
+        body: Some(body),
     }));
 
     let CodexErr::InvalidRequest(message) = err else {
         panic!("expected CodexErr::InvalidRequest, got {err:?}");
     };
-    assert_eq!(message, body);
+    assert_eq!(message, "Some other bad request.");
+}
+
+#[test]
+fn map_api_error_extracts_wrapped_websocket_invalid_request_message() {
+    let body = serde_json::json!({
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "message": "Model does not support image inputs"
+        }
+    })
+    .to_string();
+    let err = map_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::BAD_REQUEST,
+        url: Some("ws://example.com/v1/responses".to_string()),
+        headers: None,
+        body: Some(body),
+    }));
+
+    let CodexErr::InvalidRequest(message) = err else {
+        panic!("expected CodexErr::InvalidRequest, got {err:?}");
+    };
+    assert_eq!(message, "Model does not support image inputs");
+}
+
+#[test]
+fn map_api_error_explains_chatgpt_unsupported_model() {
+    let body = serde_json::json!({
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "message": "The 'gemma4:12b' model is not supported when using Codex with a ChatGPT account."
+        }
+    })
+    .to_string();
+    let err = map_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::BAD_REQUEST,
+        url: Some("ws://example.com/v1/responses".to_string()),
+        headers: None,
+        body: Some(body),
+    }));
+
+    let CodexErr::InvalidRequest(message) = err else {
+        panic!("expected CodexErr::InvalidRequest, got {err:?}");
+    };
+    assert!(message.contains("'gemma4:12b'"));
+    assert!(message.contains("not available through the ChatGPT-backed Codex provider"));
+    assert!(!message.contains("\"type\":\"error\""));
 }
 
 #[test]

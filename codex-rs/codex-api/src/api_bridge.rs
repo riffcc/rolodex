@@ -74,7 +74,9 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                     {
                         CodexErr::InvalidImageRequest()
                     } else {
-                        CodexErr::InvalidRequest(body_text)
+                        CodexErr::InvalidRequest(
+                            extract_bad_request_message(&body_text).unwrap_or(body_text),
+                        )
                     }
                 } else if status == http::StatusCode::INTERNAL_SERVER_ERROR {
                     CodexErr::InternalServerError
@@ -145,10 +147,37 @@ const X_ERROR_JSON_HEADER: &str = "x-error-json";
 const CYBER_POLICY_ERROR_CODE: &str = "cyber_policy";
 const CYBER_POLICY_FALLBACK_MESSAGE: &str =
     "This request has been flagged for possible cybersecurity risk.";
+const CHATGPT_UNSUPPORTED_MODEL_FRAGMENT: &str =
+    "model is not supported when using codex with a chatgpt account";
 
 #[cfg(test)]
 #[path = "api_bridge_tests.rs"]
 mod tests;
+
+fn extract_bad_request_message(body_text: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(body_text).ok()?;
+    let message = parsed
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .or_else(|| parsed.get("message").and_then(Value::as_str))?
+        .trim();
+    if message.is_empty() {
+        return None;
+    }
+    Some(friendly_invalid_request_message(message))
+}
+
+fn friendly_invalid_request_message(message: &str) -> String {
+    let normalized = message.to_lowercase();
+    if normalized.contains(CHATGPT_UNSUPPORTED_MODEL_FRAGMENT) {
+        return format!(
+            "{message}\n\nThis model is not available through the ChatGPT-backed Codex provider. Choose a Codex-supported model, or switch `model_provider`/`oss_provider` to a local provider that serves this model."
+        );
+    }
+
+    message.to_string()
+}
 
 fn extract_request_tracking_id(headers: Option<&HeaderMap>) -> Option<String> {
     extract_request_id(headers).or_else(|| extract_header(headers, CF_RAY_HEADER))
