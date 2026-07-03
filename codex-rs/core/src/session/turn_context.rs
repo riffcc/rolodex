@@ -580,8 +580,9 @@ impl Session {
     pub(crate) async fn new_turn_with_sub_id(
         &self,
         sub_id: String,
-        updates: SessionSettingsUpdate,
+        mut updates: SessionSettingsUpdate,
     ) -> CodexResult<Arc<TurnContext>> {
+        self.infer_model_provider_for_updates(&mut updates).await;
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
         let update_result: CodexResult<_> = {
             let mut state = self.state.lock().await;
@@ -814,7 +815,7 @@ impl Session {
                 tc,
                 EventMsg::Warning(WarningEvent {
                     message: format!(
-                        "Model metadata for `{}` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+                        "Model `{}` is not in the current provider catalog. Codex will try it with conservative defaults; if the provider rejects it, choose a supported model or switch providers.",
                         tc.model_info.slug
                     ),
                 }),

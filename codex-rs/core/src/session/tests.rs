@@ -3143,6 +3143,7 @@ async fn set_rate_limits_retains_previous_credits() {
         },
     };
     let session_configuration = SessionConfiguration {
+        model_provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -3250,6 +3251,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         },
     };
     let session_configuration = SessionConfiguration {
+        model_provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -3782,6 +3784,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
     };
 
     SessionConfiguration {
+        model_provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -4634,6 +4637,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         },
     };
     let session_configuration = SessionConfiguration {
+        model_provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -4741,6 +4745,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     };
     let default_environments = vec![local(config.cwd.clone())];
     let session_configuration = SessionConfiguration {
+        model_provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -4973,6 +4978,7 @@ async fn make_session_with_config_and_rx(
     };
     let default_environments = vec![local(config.cwd.clone())];
     let session_configuration = SessionConfiguration {
+        model_provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -5074,6 +5080,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
     };
     let default_environments = vec![local(config.cwd.clone())];
     let session_configuration = SessionConfiguration {
+        model_provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
@@ -6805,6 +6812,7 @@ where
     };
     let default_environments = vec![local(config.cwd.clone())];
     let session_configuration = SessionConfiguration {
+        model_provider_id: config.model_provider_id.clone(),
         provider: config.model_provider.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,

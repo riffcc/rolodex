@@ -105,8 +105,23 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
     /// Return the auth manager used for picker filtering.
     fn auth_manager(&self) -> Option<&AuthManager>;
 
+    /// Return whether detected external provider models should be appended to this catalog.
+    fn include_detected_provider_models(&self) -> bool {
+        false
+    }
+
+    /// Return the provider id that should serve a model from an appended external source.
+    fn detected_model_provider_id(&self, model: &str) -> Option<String> {
+        let _ = model;
+        None
+    }
+
     /// Build picker-ready presets from the active catalog snapshot.
     fn build_available_models(&self, mut remote_models: Vec<ModelInfo>) -> Vec<ModelPreset> {
+        if self.include_detected_provider_models() {
+            crate::local_ollama_models::append_detected_ollama_models(&mut remote_models);
+            crate::cerebras_models::append_detected_cerebras_models(&mut remote_models);
+        }
         remote_models.sort_by_key(|model| model.priority);
 
         let mut presets: Vec<ModelPreset> = remote_models.into_iter().map(Into::into).collect();
@@ -161,7 +176,11 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
     /// Look up model metadata, applying remote overrides and config adjustments.
     async fn get_model_info(&self, model: &str, config: &ModelsManagerConfig) -> ModelInfo {
         async move {
-            let remote_models = self.get_remote_models().await;
+            let mut remote_models = self.get_remote_models().await;
+            if self.include_detected_provider_models() {
+                crate::local_ollama_models::append_detected_ollama_models(&mut remote_models);
+                crate::cerebras_models::append_detected_cerebras_models(&mut remote_models);
+            }
             construct_model_info_from_candidates(model, &remote_models, config)
         }
         .instrument(tracing::info_span!("get_model_info", model = model))
@@ -185,6 +204,7 @@ pub struct OpenAiModelsManager {
     cache_manager: ModelsCacheManager,
     endpoint_client: SharedModelsEndpointClient,
     auth_manager: Option<Arc<AuthManager>>,
+    include_detected_provider_models: bool,
 }
 
 /// Static model manager backed by an authoritative in-process catalog.
@@ -200,6 +220,7 @@ impl OpenAiModelsManager {
         codex_home: PathBuf,
         endpoint_client: Arc<dyn ModelsEndpointClient>,
         auth_manager: Option<Arc<AuthManager>>,
+        include_detected_provider_models: bool,
     ) -> Self {
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
         let cache_manager = ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL);
@@ -210,6 +231,7 @@ impl OpenAiModelsManager {
             cache_manager,
             endpoint_client,
             auth_manager,
+            include_detected_provider_models,
         }
     }
 }
@@ -245,6 +267,20 @@ impl ModelsManager for OpenAiModelsManager {
 
     fn auth_manager(&self) -> Option<&AuthManager> {
         self.auth_manager.as_deref()
+    }
+
+    fn include_detected_provider_models(&self) -> bool {
+        self.include_detected_provider_models
+    }
+
+    fn detected_model_provider_id(&self, model: &str) -> Option<String> {
+        if !self.include_detected_provider_models {
+            return None;
+        }
+
+        crate::local_ollama_models::detected_ollama_model_provider_id(model)
+            .or_else(|| crate::cerebras_models::detected_cerebras_model_provider_id(model))
+            .map(ToString::to_string)
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {

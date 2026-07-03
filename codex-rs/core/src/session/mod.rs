@@ -515,6 +515,14 @@ impl Codex {
             None
         };
         config.startup_warnings.extend(user_instruction_warnings);
+        if let Some(model) = config.model.as_deref()
+            && let Some(model_provider_id) = models_manager.detected_model_provider_id(model)
+            && model_provider_id != config.model_provider_id
+            && let Some(model_provider) = config.model_providers.get(&model_provider_id).cloned()
+        {
+            config.model_provider_id = model_provider_id;
+            config.model_provider = model_provider;
+        }
 
         let exec_policy = if crate::guardian::is_guardian_reviewer_source(&session_source) {
             // Guardian review should rely on the built-in shell safety checks,
@@ -589,6 +597,7 @@ impl Codex {
             &model_info,
         );
         let session_configuration = SessionConfiguration {
+            model_provider_id: config.model_provider_id.clone(),
             provider: config.model_provider.clone(),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
@@ -1395,8 +1404,9 @@ impl Session {
 
     pub(crate) async fn update_settings(
         &self,
-        updates: SessionSettingsUpdate,
+        mut updates: SessionSettingsUpdate,
     ) -> ConstraintResult<()> {
+        self.infer_model_provider_for_updates(&mut updates).await;
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
         let (
             previous_config,
@@ -1406,8 +1416,11 @@ impl Session {
             next_cwd,
             codex_home,
             session_source,
+            provider_changed,
+            next_provider,
         ) = {
             let mut state = self.state.lock().await;
+            let previous_model_provider_id = state.session_configuration.model_provider_id.clone();
             let updated = match state.session_configuration.apply(&updates) {
                 Ok(updated) => updated,
                 Err(err) => {
@@ -1428,6 +1441,8 @@ impl Session {
             let next_cwd = updated.cwd().clone();
             let codex_home = updated.codex_home.clone();
             let session_source = updated.session_source.clone();
+            let provider_changed = previous_model_provider_id != updated.model_provider_id;
+            let next_provider = updated.provider.clone();
             state.session_configuration = updated;
             (
                 previous_config,
@@ -1437,6 +1452,8 @@ impl Session {
                 next_cwd,
                 codex_home,
                 session_source,
+                provider_changed,
+                next_provider,
             )
         };
 
@@ -1451,6 +1468,11 @@ impl Session {
             self.refresh_managed_network_proxy_for_current_permission_profile()
                 .await;
         }
+        if provider_changed {
+            self.services
+                .model_client
+                .set_provider_info(Some(Arc::clone(&self.services.auth_manager)), next_provider);
+        }
 
         Ok(())
     }
@@ -1459,11 +1481,39 @@ impl Session {
         &self,
         updates: &SessionSettingsUpdate,
     ) -> ConstraintResult<ThreadConfigSnapshot> {
+        let mut updates = updates.clone();
+        self.infer_model_provider_for_updates(&mut updates).await;
         let state = self.state.lock().await;
         state
             .session_configuration
-            .apply(updates)
+            .apply(&updates)
             .map(|configuration| configuration.thread_config_snapshot())
+    }
+
+    async fn infer_model_provider_for_updates(&self, updates: &mut SessionSettingsUpdate) {
+        if updates.model_provider_id.is_some() {
+            return;
+        }
+        let requested_model = updates
+            .collaboration_mode
+            .as_ref()
+            .map(codex_protocol::config_types::CollaborationMode::model);
+        let Some(requested_model) = requested_model else {
+            return;
+        };
+        let fallback_model_provider_id = {
+            let state = self.state.lock().await;
+            state
+                .session_configuration
+                .original_config_do_not_use
+                .model_provider_id
+                .clone()
+        };
+        let provider_id = self
+            .services
+            .models_manager
+            .detected_model_provider_id(requested_model);
+        updates.model_provider_id = Some(provider_id.unwrap_or(fallback_model_provider_id));
     }
 
     pub(crate) async fn set_session_startup_prewarm(

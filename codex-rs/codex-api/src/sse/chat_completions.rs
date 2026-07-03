@@ -386,12 +386,14 @@ async fn flush_tool_calls(
 ) -> Result<(), ApiError> {
     let tool_calls = std::mem::take(&mut state.tool_calls);
     for (_, tool_call) in tool_calls {
+        let name = tool_call
+            .name
+            .ok_or_else(|| ApiError::Stream("tool call missing name".to_string()))?;
+        let (namespace, name) = split_chat_function_name(&name);
         let item = ResponseItem::FunctionCall {
             id: None,
-            name: tool_call
-                .name
-                .ok_or_else(|| ApiError::Stream("tool call missing name".to_string()))?,
-            namespace: None,
+            name,
+            namespace,
             arguments: tool_call.arguments,
             call_id: tool_call
                 .id
@@ -405,6 +407,25 @@ async fn flush_tool_calls(
             })?;
     }
     Ok(())
+}
+
+fn split_chat_function_name(name: &str) -> (Option<String>, String) {
+    let Some((namespace, tool_name)) = name.rsplit_once("__") else {
+        return (None, name.to_string());
+    };
+    if namespace.is_empty() || tool_name.is_empty() {
+        return (None, name.to_string());
+    }
+    let namespace_is_known = namespace.starts_with("mcp__")
+        || matches!(
+            namespace,
+            "codex_app" | "image_gen" | "multi_agent_v1" | "web"
+        );
+    if namespace_is_known {
+        (Some(namespace.to_string()), tool_name.to_string())
+    } else {
+        (None, name.to_string())
+    }
 }
 
 async fn flush_and_complete(
@@ -577,6 +598,33 @@ mod tests {
                 }),
                 ..
             } if response_id == "chatcmpl-2"
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_completion_namespaced_tool_call_stream_restores_namespace() {
+        let chunks = [
+            br#"data: {"id":"chatcmpl-namespace","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"mcp__demo__lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}
+
+"# as &[u8],
+            br#"data: [DONE]
+
+"#,
+        ];
+
+        let events = collect_events(&chunks).await;
+        assert!(matches!(
+            &events[2],
+            ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                namespace,
+                name,
+                arguments,
+                call_id,
+                ..
+            }) if namespace.as_deref() == Some("mcp__demo")
+                && name == "lookup"
+                && arguments == "{}"
+                && call_id == "call_1"
         ));
     }
 

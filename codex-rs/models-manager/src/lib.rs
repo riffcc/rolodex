@@ -1,6 +1,8 @@
 pub(crate) mod cache;
+pub(crate) mod cerebras_models;
 pub mod collaboration_mode_presets;
 pub(crate) mod config;
+pub(crate) mod local_ollama_models;
 pub mod manager;
 pub mod model_info;
 pub mod model_presets;

@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
+use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -176,7 +177,7 @@ struct ModelClientState {
     thread_id: ThreadId,
     window_generation: AtomicU64,
     installation_id: String,
-    provider: SharedModelProvider,
+    provider: StdRwLock<SharedModelProvider>,
     auth_env_telemetry: AuthEnvTelemetry,
     session_source: SessionSource,
     parent_thread_id: Option<ThreadId>,
@@ -349,7 +350,7 @@ impl ModelClient {
                 thread_id,
                 window_generation: AtomicU64::new(0),
                 installation_id,
-                provider: model_provider,
+                provider: StdRwLock::new(model_provider),
                 auth_env_telemetry,
                 session_source,
                 parent_thread_id,
@@ -393,7 +394,25 @@ impl ModelClient {
     }
 
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
-        self.state.provider.auth_manager()
+        self.provider().auth_manager()
+    }
+
+    pub(crate) fn set_provider_info(
+        &self,
+        auth_manager: Option<Arc<AuthManager>>,
+        provider_info: ModelProviderInfo,
+    ) {
+        let model_provider = create_model_provider(provider_info, auth_manager);
+        let mut provider = self
+            .state
+            .provider
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *provider = model_provider;
+        self.state
+            .disable_websockets
+            .store(false, Ordering::Relaxed);
+        self.store_cached_websocket_session(WebsocketSession::default());
     }
 
     pub(crate) fn set_window_generation(&self, window_generation: u64) {
@@ -412,6 +431,14 @@ impl ModelClient {
         let thread_id = self.state.thread_id;
         let window_generation = self.state.window_generation.load(Ordering::Relaxed);
         format!("{thread_id}:{window_generation}")
+    }
+
+    fn provider(&self) -> SharedModelProvider {
+        self.state
+            .provider
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn take_cached_websocket_session(&self) -> WebsocketSession {
@@ -822,7 +849,7 @@ impl ModelClient {
     ///
     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
     pub fn responses_websocket_enabled(&self) -> bool {
-        if !self.state.provider.info().supports_websockets
+        if !self.provider().info().supports_websockets
             || self.state.disable_websockets.load(Ordering::Relaxed)
         {
             return false;
@@ -836,9 +863,10 @@ impl ModelClient {
     /// This centralizes setup used by both prewarm and normal request paths so they stay in
     /// lockstep when auth/provider resolution changes.
     async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
-        let auth = self.state.provider.auth().await;
-        let api_provider = self.state.provider.api_provider().await?;
-        let api_auth = self.state.provider.api_auth().await?;
+        let provider = self.provider();
+        let auth = provider.auth().await;
+        let api_provider = provider.api_provider().await?;
+        let api_auth = provider.api_auth().await?;
         Ok(CurrentClientSetup {
             auth,
             api_provider,
@@ -870,7 +898,7 @@ impl ModelClient {
             request_route_telemetry,
             self.state.auth_env_telemetry.clone(),
         );
-        let websocket_connect_timeout = self.state.provider.info().websocket_connect_timeout();
+        let websocket_connect_timeout = self.provider().info().websocket_connect_timeout();
         let start = Instant::now();
         let result = match tokio::time::timeout(
             websocket_connect_timeout,
@@ -1159,8 +1187,8 @@ impl ModelClientSession {
         level = "info",
         skip_all,
         fields(
-            provider = %self.client.state.provider.info().name,
-            wire_api = %self.client.state.provider.info().wire_api,
+            provider = %self.client.provider().info().name,
+            wire_api = %self.client.provider().info().wire_api,
             transport = "responses_websocket",
             api.path = "responses",
             turn.has_metadata_header = params.turn_metadata_header.is_some()
@@ -1232,7 +1260,7 @@ impl ModelClientSession {
     fn responses_request_compression(&self, auth: Option<&CodexAuth>) -> Compression {
         if self.client.state.enable_request_compression
             && auth.is_some_and(CodexAuth::uses_codex_backend)
-            && self.client.state.provider.info().is_openai()
+            && self.client.provider().info().is_openai()
         {
             Compression::Zstd
         } else {
@@ -1250,7 +1278,7 @@ impl ModelClientSession {
         skip_all,
         fields(
             model = %model_info.slug,
-            wire_api = %self.client.state.provider.info().wire_api,
+            wire_api = %self.client.provider().info().wire_api,
             transport = "responses_http",
             http.method = "POST",
             api.path = "responses",
@@ -1268,7 +1296,7 @@ impl ModelClientSession {
         turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        let auth_manager = self.client.state.provider.auth_manager();
+        let auth_manager = self.client.provider().auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
@@ -1368,7 +1396,7 @@ impl ModelClientSession {
         skip_all,
         fields(
             model = %model_info.slug,
-            wire_api = %self.client.state.provider.info().wire_api,
+            wire_api = %self.client.provider().info().wire_api,
             transport = "chat_completions_http",
             http.method = "POST",
             api.path = "chat/completions",
@@ -1386,7 +1414,7 @@ impl ModelClientSession {
         turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        let auth_manager = self.client.state.provider.auth_manager();
+        let auth_manager = self.client.provider().auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
@@ -1482,7 +1510,7 @@ impl ModelClientSession {
         skip_all,
         fields(
             model = %model_info.slug,
-            wire_api = %self.client.state.provider.info().wire_api,
+            wire_api = %self.client.provider().info().wire_api,
             transport = "responses_websocket",
             api.path = "responses",
             turn.has_metadata_header = turn_metadata_header.is_some(),
@@ -1502,7 +1530,7 @@ impl ModelClientSession {
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<WebsocketStreamOutcome> {
-        let auth_manager = self.client.state.provider.auth_manager();
+        let auth_manager = self.client.provider().auth_manager();
 
         let mut auth_recovery = auth_manager
             .as_ref()
@@ -1740,7 +1768,7 @@ impl ModelClientSession {
         turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        let wire_api = self.client.state.provider.info().wire_api;
+        let wire_api = self.client.provider().info().wire_api;
         match wire_api {
             WireApi::Responses => {
                 if self.client.responses_websocket_enabled() {

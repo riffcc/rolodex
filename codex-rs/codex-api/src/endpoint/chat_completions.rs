@@ -134,7 +134,7 @@ fn translate_responses_request_to_chat_body(
     let tools = request
         .tools
         .into_iter()
-        .map(translate_tool_to_chat_tool)
+        .map(translate_tool_to_chat_tools)
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -166,11 +166,12 @@ fn translate_input_to_chat_messages(
         match item {
             ResponseItem::FunctionCall {
                 name,
+                namespace,
                 arguments,
                 call_id,
                 ..
             } => Ok(Some(chat_tool_call(
-                name,
+                &chat_function_name(namespace.as_deref(), name),
                 arguments.clone(),
                 call_id.clone(),
             ))),
@@ -236,7 +237,7 @@ fn translate_input_to_chat_messages(
             }
             messages.push(json!({
                 "role": "assistant",
-                "content": "",
+                "content": Value::Null,
                 "tool_calls": tool_calls,
             }));
             continue;
@@ -356,7 +357,26 @@ fn chat_tool_call(name: &str, arguments: String, call_id: String) -> Value {
     })
 }
 
-fn translate_tool_to_chat_tool(tool: Value) -> Result<Option<Value>, ApiError> {
+fn chat_function_name(namespace: Option<&str>, name: &str) -> String {
+    match namespace {
+        Some(namespace) if !namespace.is_empty() => format!("{namespace}__{name}"),
+        _ => name.to_string(),
+    }
+}
+
+fn chat_function_tool(name: Value, description: Value, parameters: Value, strict: Value) -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+            "strict": strict,
+        }
+    })
+}
+
+fn translate_tool_to_chat_tools(tool: Value) -> Result<Vec<Value>, ApiError> {
     let Some(kind) = tool.get("type").and_then(Value::as_str) else {
         return Err(ApiError::InvalidRequest {
             message: "chat compatibility could not translate a tool without a type".to_string(),
@@ -364,15 +384,66 @@ fn translate_tool_to_chat_tool(tool: Value) -> Result<Option<Value>, ApiError> {
     };
 
     match kind {
-        "function" => Ok(Some(json!({
-            "type": "function",
-            "function": {
-                "name": tool.get("name").cloned().unwrap_or(Value::Null),
-                "description": tool.get("description").cloned().unwrap_or(Value::Null),
-                "parameters": tool.get("parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {}, "additionalProperties": false })),
-                "strict": tool.get("strict").cloned().unwrap_or(Value::Bool(false)),
-            }
-        }))),
+        "function" => Ok(vec![chat_function_tool(
+            tool.get("name").cloned().unwrap_or(Value::Null),
+            tool.get("description").cloned().unwrap_or(Value::Null),
+            tool.get("parameters").cloned().unwrap_or_else(
+                || json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            ),
+            tool.get("strict").cloned().unwrap_or(Value::Bool(false)),
+        )]),
+        "namespace" => {
+            let namespace = tool.get("name").and_then(Value::as_str).ok_or_else(|| {
+                ApiError::InvalidRequest {
+                    message:
+                        "chat compatibility could not translate a namespace tool without a name"
+                            .to_string(),
+                }
+            })?;
+            let namespace_description = tool
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let tools = tool.get("tools").and_then(Value::as_array).ok_or_else(|| {
+                ApiError::InvalidRequest {
+                    message:
+                        "chat compatibility could not translate a namespace tool without tools"
+                            .to_string(),
+                }
+            })?;
+            tools
+                .iter()
+                .map(|child| {
+                    let name = child.get("name").and_then(Value::as_str).ok_or_else(|| {
+                        ApiError::InvalidRequest {
+                            message: "chat compatibility could not translate a namespace child without a name"
+                                .to_string(),
+                        }
+                    })?;
+                    let description = child
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let description = match (namespace_description.is_empty(), description.is_empty()) {
+                        (true, true) => Value::Null,
+                        (true, false) => Value::String(description.to_string()),
+                        (false, true) => Value::String(namespace_description.to_string()),
+                        (false, false) => {
+                            Value::String(format!("{namespace_description}\n\n{description}"))
+                        }
+                    };
+                    Ok(chat_function_tool(
+                        Value::String(chat_function_name(Some(namespace), name)),
+                        description,
+                        child
+                            .get("parameters")
+                            .cloned()
+                            .unwrap_or_else(|| json!({ "type": "object", "properties": {}, "additionalProperties": false })),
+                        child.get("strict").cloned().unwrap_or(Value::Bool(false)),
+                    ))
+                })
+                .collect()
+        }
         "custom" => {
             let name = tool.get("name").and_then(Value::as_str).ok_or_else(|| {
                 ApiError::InvalidRequest {
@@ -406,7 +477,7 @@ fn translate_tool_to_chat_tool(tool: Value) -> Result<Option<Value>, ApiError> {
                     translated_description.push_str(&format!("\nDefinition: {definition}"));
                 }
             }
-            Ok(Some(json!({
+            Ok(vec![json!({
                 "type": "function",
                 "function": {
                     "name": name,
@@ -424,9 +495,9 @@ fn translate_tool_to_chat_tool(tool: Value) -> Result<Option<Value>, ApiError> {
                     },
                     "strict": false,
                 }
-            })))
+            })])
         }
-        "local_shell" => Ok(Some(json!({
+        "local_shell" => Ok(vec![json!({
             "type": "function",
             "function": {
                 "name": "local_shell",
@@ -453,13 +524,13 @@ fn translate_tool_to_chat_tool(tool: Value) -> Result<Option<Value>, ApiError> {
                 },
                 "strict": false,
             }
-        }))),
+        })]),
         "web_search" | "image_generation" => {
             warn!(
                 tool_type = kind,
                 "dropping Responses-native tool from chat compatibility request"
             );
-            Ok(None)
+            Ok(Vec::new())
         }
         unsupported => Err(ApiError::InvalidRequest {
             message: format!(
@@ -492,7 +563,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn chat_compatibility_drops_responses_native_tools() {
+    fn chat_compatibility_translates_supported_tools_and_drops_native_tools() {
         let request = ResponsesApiRequest {
             model: "chat-model".to_string(),
             instructions: "system".to_string(),
@@ -505,6 +576,20 @@ mod tests {
                 json!({
                     "type": "image_generation",
                     "output_format": "png"
+                }),
+                json!({
+                    "type": "namespace",
+                    "name": "mcp__demo",
+                    "description": "Demo tools.",
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Looks something up.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    }]
                 }),
                 json!({
                     "type": "function",
@@ -535,8 +620,9 @@ mod tests {
 
         let body = translate_responses_request_to_chat_body(request).expect("request translates");
         let tools = body["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["function"]["name"], json!("echo"));
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["function"]["name"], json!("mcp__demo__lookup"));
+        assert_eq!(tools[1]["function"]["name"], json!("echo"));
         assert_eq!(body["tool_choice"], json!("auto"));
         assert_eq!(body["parallel_tool_calls"], json!(true));
     }
@@ -721,6 +807,14 @@ mod tests {
                     call_id: "call_2".to_string(),
                     output: FunctionCallOutputPayload::from_text("M foo.rs".to_string()),
                 },
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "now continue".to_string(),
+                    }],
+                    phase: None,
+                },
             ],
             tools: Vec::new(),
             tool_choice: "auto".to_string(),
@@ -745,7 +839,7 @@ mod tests {
                 },
                 {
                     "role": "assistant",
-                    "content": "",
+                    "content": null,
                     "tool_calls": [
                         {
                             "id": "call_1",
@@ -774,6 +868,10 @@ mod tests {
                     "role": "tool",
                     "tool_call_id": "call_2",
                     "content": "M foo.rs"
+                },
+                {
+                    "role": "user",
+                    "content": "now continue"
                 }
             ])
         );

@@ -1,8 +1,7 @@
 use std::collections::HashSet;
 
-const FALLBACK_MODEL_METADATA_WARNING_PREFIX: &str = "Model metadata for `";
-const FALLBACK_MODEL_METADATA_WARNING_SUFFIX: &str =
-    "` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.";
+const FALLBACK_MODEL_METADATA_WARNING_PREFIX: &str = "Model `";
+const FALLBACK_MODEL_METADATA_WARNING_SUFFIX: &str = "` is not in the current provider catalog. Codex will try it with conservative defaults; if the provider rejects it, choose a supported model or switch providers.";
 
 #[derive(Default)]
 pub(super) struct WarningDisplayState {

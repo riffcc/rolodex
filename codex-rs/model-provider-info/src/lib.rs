@@ -43,6 +43,10 @@ pub const AMAZON_BEDROCK_DEFAULT_BASE_URL: &str =
     "https://bedrock-mantle.us-east-1.api.aws/openai/v1";
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER: &str = "x-amzn-mantle-client-agent";
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE: &str = "codex";
+const CEREBRAS_PROVIDER_NAME: &str = "Cerebras";
+pub const CEREBRAS_PROVIDER_ID: &str = "cerebras";
+pub const CEREBRAS_DEFAULT_BASE_URL: &str = "https://api.cerebras.ai/v1";
+pub const CEREBRAS_API_KEY_ENV_VAR: &str = "CEREBRAS_API_KEY";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
@@ -404,6 +408,31 @@ impl ModelProviderInfo {
         }
     }
 
+    pub fn create_cerebras_provider() -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: CEREBRAS_PROVIDER_NAME.into(),
+            base_url: Some(CEREBRAS_DEFAULT_BASE_URL.into()),
+            env_key: Some(CEREBRAS_API_KEY_ENV_VAR.into()),
+            env_key_instructions: Some(
+                "Create a Cerebras API key at https://cloud.cerebras.ai and set CEREBRAS_API_KEY."
+                    .to_string(),
+            ),
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Chat,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
+
     pub fn is_openai(&self) -> bool {
         self.name == OPENAI_PROVIDER_NAME
     }
@@ -434,14 +463,14 @@ pub fn built_in_model_providers(
     use ModelProviderInfo as P;
     let openai_provider = P::create_openai_provider(openai_base_url);
     let amazon_bedrock_provider = P::create_amazon_bedrock_provider(/*aws*/ None);
+    let cerebras_provider = P::create_cerebras_provider();
 
-    // We do not want to be in the business of adjucating which third-party
-    // providers are bundled with Codex CLI, so we only include the OpenAI and
-    // open source ("oss") providers by default. Users are encouraged to add to
-    // `model_providers` in config.toml to add their own providers.
+    // Keep this list short. Users can add more OpenAI-compatible providers in
+    // `model_providers` in config.toml.
     [
         (OPENAI_PROVIDER_ID, openai_provider),
         (AMAZON_BEDROCK_PROVIDER_ID, amazon_bedrock_provider),
+        (CEREBRAS_PROVIDER_ID, cerebras_provider),
         (
             OLLAMA_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses),

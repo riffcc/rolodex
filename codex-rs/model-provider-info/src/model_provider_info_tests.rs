@@ -283,6 +283,35 @@ fn test_create_amazon_bedrock_provider() {
 }
 
 #[test]
+fn test_create_cerebras_provider() {
+    assert_eq!(
+        ModelProviderInfo::create_cerebras_provider(),
+        ModelProviderInfo {
+            name: "Cerebras".to_string(),
+            base_url: Some("https://api.cerebras.ai/v1".to_string()),
+            env_key: Some("CEREBRAS_API_KEY".to_string()),
+            env_key_instructions: Some(
+                "Create a Cerebras API key at https://cloud.cerebras.ai and set CEREBRAS_API_KEY."
+                    .to_string(),
+            ),
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Chat,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    );
+}
+
+#[test]
 fn test_amazon_bedrock_provider_adds_mantle_client_agent_header() {
     let api_provider = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None)
         .to_api_provider(/*auth_mode*/ None)
@@ -306,6 +335,16 @@ fn test_built_in_model_providers_include_amazon_bedrock() {
             .get(AMAZON_BEDROCK_PROVIDER_ID)
             .map(ModelProviderInfo::is_amazon_bedrock),
         Some(true)
+    );
+}
+
+#[test]
+fn test_built_in_model_providers_include_cerebras() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    assert_eq!(
+        providers.get(CEREBRAS_PROVIDER_ID),
+        Some(&ModelProviderInfo::create_cerebras_provider())
     );
 }
 
