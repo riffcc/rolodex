@@ -1270,8 +1270,50 @@ fn completed_smart_read_tool_call_uses_smart_label_snapshot() {
     let rendered = render_lines(&cell.display_lines(/*width*/ 96)).join("\n");
 
     insta::assert_snapshot!(rendered, @r"
-• Called SmartRead codex-rs/tui/src/history_cell/mcp.rs (smart)
-  └ Read structural view for mcp.rs
+• Called SmartRead
+  └ path: codex-rs/tui/src/history_cell/mcp.rs
+    layer: smart
+    Read structural view for mcp.rs
+");
+}
+
+#[test]
+fn completed_smart_read_tool_call_keeps_tool_name_visible_when_narrow_snapshot() {
+    let invocation = McpInvocation {
+        server: "llm-code-sdk".into(),
+        tool: "smart_read".into(),
+        arguments: Some(json!({
+            "path": "codex-rs/tui/src/history_cell/mcp.rs",
+            "layer": "smart",
+        })),
+    };
+
+    let result = CallToolResult {
+        content: vec![text_block("Read structural view for mcp.rs")],
+        is_error: None,
+        structured_content: None,
+        meta: None,
+    };
+
+    let mut cell = new_active_mcp_tool_call(
+        "call-smart-read-narrow".into(),
+        invocation,
+        /*animations_enabled*/ false,
+    );
+    assert!(
+        cell.complete(Duration::from_millis(42), Ok(result))
+            .is_none()
+    );
+
+    let rendered = render_lines(&cell.display_lines(/*width*/ 32)).join("\n");
+
+    insta::assert_snapshot!(rendered, @r"
+• Called SmartRead
+  └ path: codex-rs/tui/src/
+        history_cell/mcp.rs
+    layer: smart
+    Read structural view for
+        mcp.rs
 ");
 }
 
@@ -1306,8 +1348,10 @@ fn completed_smart_search_tool_call_uses_smart_label_snapshot() {
     let rendered = render_lines(&cell.display_lines(/*width*/ 96)).join("\n");
 
     insta::assert_snapshot!(rendered, @r"
-• Called SmartSearch tool continuation
-  └ Found matching commits
+• Called SmartSearch
+  └ query: tool continuation
+    limit: 5
+    Found matching commits
 ");
 }
 

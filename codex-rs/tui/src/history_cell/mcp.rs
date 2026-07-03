@@ -136,6 +136,29 @@ impl HistoryCell for McpToolCallCell {
             "Calling"
         };
 
+        if let Some(smart_tool) = smart_tool_display(&self.invocation) {
+            lines.push(Line::from(vec![
+                bullet,
+                " ".into(),
+                header_text.bold(),
+                " ".into(),
+                smart_tool.title.cyan(),
+            ]));
+
+            let detail_wrap_width = (width as usize).saturating_sub(4).max(1);
+            let mut detail_lines = smart_tool.details;
+            detail_lines.extend(result_detail_lines(self.result.as_ref(), detail_wrap_width));
+            if !detail_lines.is_empty() {
+                lines.extend(prefix_lines(
+                    wrap_detail_lines(detail_lines, detail_wrap_width),
+                    "  └ ".dim(),
+                    "    ".into(),
+                ));
+            }
+
+            return lines;
+        }
+
         let invocation_line = line_to_static(&format_mcp_invocation(self.invocation.clone()));
         let mut compact_spans = vec![bullet.clone(), " ".into(), header_text.bold(), " ".into()];
         let mut compact_header = Line::from(compact_spans.clone());
@@ -163,42 +186,10 @@ impl HistoryCell for McpToolCallCell {
         // Reserve four columns for the tree prefix ("  └ "/"    ") and ensure the wrapper still has at least one cell to work with.
         let detail_wrap_width = (width as usize).saturating_sub(4).max(1);
 
-        if let Some(result) = &self.result {
-            match result {
-                Ok(codex_protocol::mcp::CallToolResult { content, .. }) => {
-                    if !content.is_empty() {
-                        for block in content {
-                            let text = Self::render_content_block(block, detail_wrap_width);
-                            for segment in text.split('\n') {
-                                let line = Line::from(segment.to_string().dim());
-                                let wrapped = adaptive_wrap_line(
-                                    &line,
-                                    RtOptions::new(detail_wrap_width)
-                                        .initial_indent("".into())
-                                        .subsequent_indent("    ".into()),
-                                );
-                                detail_lines.extend(wrapped.iter().map(line_to_static));
-                            }
-                        }
-                    }
-                }
-                Err(err) => {
-                    let err_text = format_and_truncate_tool_result(
-                        &format!("Error: {err}"),
-                        TOOL_CALL_MAX_LINES,
-                        width as usize,
-                    );
-                    let err_line = Line::from(err_text.dim());
-                    let wrapped = adaptive_wrap_line(
-                        &err_line,
-                        RtOptions::new(detail_wrap_width)
-                            .initial_indent("".into())
-                            .subsequent_indent("    ".into()),
-                    );
-                    detail_lines.extend(wrapped.iter().map(line_to_static));
-                }
-            }
-        }
+        detail_lines.extend(wrap_detail_lines(
+            result_detail_lines(self.result.as_ref(), detail_wrap_width),
+            detail_wrap_width,
+        ));
 
         if !detail_lines.is_empty() {
             let initial_prefix: Span<'static> = if inline_invocation {
@@ -253,6 +244,137 @@ pub(crate) fn new_active_mcp_tool_call(
 ) -> McpToolCallCell {
     McpToolCallCell::new(call_id, invocation, animations_enabled)
 }
+
+#[derive(Debug)]
+struct SmartToolDisplay {
+    title: &'static str,
+    details: Vec<Line<'static>>,
+}
+
+fn smart_tool_display(invocation: &McpInvocation) -> Option<SmartToolDisplay> {
+    let title = smart_tool_title(invocation.tool.as_str())?;
+    let details = smart_tool_detail_lines(invocation.tool.as_str(), invocation.arguments.as_ref());
+
+    Some(SmartToolDisplay { title, details })
+}
+
+fn smart_tool_title(tool: &str) -> Option<&'static str> {
+    match tool {
+        "smart_read" => Some("SmartRead"),
+        "smart_search" | "mr_search" => Some("SmartSearch"),
+        "smart_write" => Some("SmartWrite"),
+        "ask_code" => Some("AskCode"),
+        "examples" | "examples_tool" => Some("Examples"),
+        _ => None,
+    }
+}
+
+fn smart_tool_detail_lines(tool: &str, args: Option<&serde_json::Value>) -> Vec<Line<'static>> {
+    let Some(serde_json::Value::Object(object)) = args else {
+        return args
+            .map(|value| vec![Line::from(compact_json_value(value).dim())])
+            .unwrap_or_default();
+    };
+
+    let preferred_keys: &[&str] = match tool {
+        "smart_read" => &["path", "layer", "target", "symbol"],
+        "smart_search" | "mr_search" => &["query", "days", "limit"],
+        "smart_write" => &["operation", "path", "target", "after", "dry_run"],
+        "ask_code" => &["question", "query"],
+        "examples" | "examples_tool" => &["query", "limit"],
+        _ => &[],
+    };
+
+    let mut details = Vec::new();
+    for key in preferred_keys {
+        if let Some(value) = object.get(*key)
+            && !value.is_null()
+        {
+            details.push(smart_detail_line(key, value));
+        }
+    }
+
+    let mut extra_keys = object
+        .keys()
+        .filter(|key| !preferred_keys.contains(&key.as_str()))
+        .collect::<Vec<_>>();
+    extra_keys.sort();
+
+    for key in extra_keys {
+        if let Some(value) = object.get(key)
+            && !value.is_null()
+        {
+            details.push(smart_detail_line(key, value));
+        }
+    }
+
+    details
+}
+
+fn smart_detail_line(key: &str, value: &serde_json::Value) -> Line<'static> {
+    Line::from(vec![
+        format!("{key}: ").dim(),
+        smart_value_display(value).into(),
+    ])
+}
+
+fn smart_value_display(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| compact_json_value(value))
+}
+
+fn compact_json_value(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn result_detail_lines(
+    result: Option<&Result<codex_protocol::mcp::CallToolResult, String>>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut detail_lines = Vec::new();
+
+    if let Some(result) = result {
+        match result {
+            Ok(codex_protocol::mcp::CallToolResult { content, .. }) => {
+                if !content.is_empty() {
+                    for block in content {
+                        let text = McpToolCallCell::render_content_block(block, width);
+                        for segment in text.split('\n') {
+                            detail_lines.push(Line::from(segment.to_string().dim()));
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                let err_text = format_and_truncate_tool_result(
+                    &format!("Error: {err}"),
+                    TOOL_CALL_MAX_LINES,
+                    width,
+                );
+                detail_lines.push(Line::from(err_text.dim()));
+            }
+        }
+    }
+
+    detail_lines
+}
+
+fn wrap_detail_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let mut wrapped_lines = Vec::new();
+    for line in lines {
+        let wrapped = adaptive_wrap_line(
+            &line,
+            RtOptions::new(width)
+                .initial_indent("".into())
+                .subsequent_indent("    ".into()),
+        );
+        wrapped_lines.extend(wrapped.iter().map(line_to_static));
+    }
+    wrapped_lines
+}
+
 /// Returns an additional history cell if an MCP tool result includes a decodable image.
 ///
 /// This intentionally returns at most one cell: the first image in `CallToolResult.content` that
@@ -671,8 +793,21 @@ pub(crate) fn new_mcp_inventory_loading(animations_enabled: bool) -> McpInventor
     McpInventoryLoadingCell::new(animations_enabled)
 }
 fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
-    if let Some(smart_tool) = format_smart_tool_invocation(&invocation) {
-        return smart_tool;
+    if let Some(title) = smart_tool_title(invocation.tool.as_str()) {
+        let mut spans = vec![title.cyan()];
+        let summary = smart_tool_summary(invocation.tool.as_str(), invocation.arguments.as_ref());
+        if !summary.is_empty() {
+            spans.push(" ".into());
+            spans.push(summary.dim());
+        }
+        if let Some(layer) = smart_arg(invocation.arguments.as_ref(), "layer")
+            && !layer.is_empty()
+        {
+            spans.push(" (".dim());
+            spans.push(layer.dim());
+            spans.push(")".dim());
+        }
+        return spans.into();
     }
 
     let args_str = invocation
@@ -695,18 +830,8 @@ fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
     invocation_spans.into()
 }
 
-fn format_smart_tool_invocation(invocation: &McpInvocation) -> Option<Line<'static>> {
-    let tool = invocation.tool.as_str();
-    let title = match tool {
-        "smart_read" => "SmartRead",
-        "smart_search" | "mr_search" => "SmartSearch",
-        "smart_write" => "SmartWrite",
-        "ask_code" => "AskCode",
-        "examples" | "examples_tool" => "Examples",
-        _ => return None,
-    };
-    let args = invocation.arguments.as_ref();
-    let summary = match tool {
+fn smart_tool_summary(tool: &str, args: Option<&serde_json::Value>) -> String {
+    match tool {
         "smart_read" => smart_arg(args, "path")
             .or_else(|| smart_arg(args, "target"))
             .or_else(|| smart_arg(args, "symbol"))
@@ -727,21 +852,7 @@ fn format_smart_tool_invocation(invocation: &McpInvocation) -> Option<Line<'stat
             }
         }
         _ => smart_args_fallback(args),
-    };
-
-    let mut spans = vec![title.cyan()];
-    if !summary.is_empty() {
-        spans.push(" ".into());
-        spans.push(summary.dim());
     }
-    if let Some(layer) = smart_arg(args, "layer")
-        && !layer.is_empty()
-    {
-        spans.push(" (".dim());
-        spans.push(layer.dim());
-        spans.push(")".dim());
-    }
-    Some(Line::from(spans))
 }
 
 fn smart_arg(args: Option<&serde_json::Value>, key: &str) -> Option<String> {
