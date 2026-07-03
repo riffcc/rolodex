@@ -255,10 +255,15 @@ impl ModelProvider for ConfiguredModelProvider {
                     codex_home,
                     endpoint,
                     self.auth_manager.clone(),
+                    should_include_detected_provider_models(&self.info),
                 ))
             }
         }
     }
+}
+
+fn should_include_detected_provider_models(info: &ModelProviderInfo) -> bool {
+    !info.is_amazon_bedrock()
 }
 
 #[cfg(test)]
@@ -350,6 +355,18 @@ mod tests {
             "experimental_supported_tools": [],
         }))
         .expect("valid model")
+    }
+
+    #[test]
+    fn ollama_base_url_enables_local_ollama_models() {
+        let provider = provider_for("http://localhost:11434/v1".to_string());
+        assert!(should_include_detected_provider_models(&provider));
+    }
+
+    #[test]
+    fn openai_provider_enables_local_ollama_models() {
+        let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+        assert!(should_include_detected_provider_models(&provider));
     }
 
     #[test]
