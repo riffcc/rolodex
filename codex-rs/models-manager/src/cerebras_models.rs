@@ -9,6 +9,7 @@ use codex_protocol::openai_models::WebSearchToolType;
 use crate::model_info::BASE_INSTRUCTIONS;
 
 const CEREBRAS_API_KEY_ENV_VAR: &str = "CEREBRAS_API_KEY";
+const CEREBRAS_API_TOKEN_ENV_VAR: &str = "CEREBRAS_API_TOKEN";
 const CEREBRAS_PROVIDER_ID: &str = "cerebras";
 pub(crate) const CEREBRAS_GEMMA4_MODEL: &str = "gemma-4-31b";
 
@@ -41,7 +42,13 @@ fn append_cerebras_models(models: &mut Vec<ModelInfo>, api_key_available: bool) 
 }
 
 fn cerebras_api_key_available() -> bool {
-    std::env::var(CEREBRAS_API_KEY_ENV_VAR).is_ok_and(|value| !value.trim().is_empty())
+    cerebras_api_key_available_with_env(|name| std::env::var(name).ok())
+}
+
+fn cerebras_api_key_available_with_env(get_env: impl Fn(&str) -> Option<String>) -> bool {
+    [CEREBRAS_API_KEY_ENV_VAR, CEREBRAS_API_TOKEN_ENV_VAR]
+        .iter()
+        .any(|name| get_env(name).is_some_and(|value| !value.trim().is_empty()))
 }
 
 fn gemma4_model_info() -> ModelInfo {

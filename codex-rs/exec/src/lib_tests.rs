@@ -590,7 +590,11 @@ async fn thread_lifecycle_params_include_legacy_sandbox_when_no_active_profile()
         .expect("build config with legacy sandbox override");
 
     let start_params = thread_start_params_from_config(&config);
-    let resume_params = thread_resume_params_from_config(&config, "thread-id".to_string());
+    let resume_params = thread_resume_params_from_config(
+        &config,
+        "thread-id".to_string(),
+        &ResumeModelOverrides::default(),
+    );
 
     assert_eq!(config.permissions.active_permission_profile(), None);
     assert_eq!(
@@ -603,6 +607,40 @@ async fn thread_lifecycle_params_include_legacy_sandbox_when_no_active_profile()
         Some(codex_app_server_protocol::SandboxMode::DangerFullAccess)
     );
     assert_eq!(resume_params.permissions, None);
+    assert_eq!(resume_params.model, None);
+    assert_eq!(resume_params.model_provider, None);
+}
+
+#[tokio::test]
+async fn resume_model_overrides_are_only_sent_when_explicit() {
+    let codex_home = tempdir().expect("create temp codex home");
+    let cwd = tempdir().expect("create temp cwd");
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(cwd.path().to_path_buf()))
+        .build()
+        .await
+        .expect("build config");
+    config.model = Some("gemma-4-31b".to_string());
+    config.model_provider_id = "cerebras".to_string();
+
+    assert_eq!(
+        ResumeModelOverrides::from_config(&config, ResumeOverrideSources::default()),
+        ResumeModelOverrides::default()
+    );
+    assert_eq!(
+        ResumeModelOverrides::from_config(
+            &config,
+            ResumeOverrideSources {
+                model: true,
+                model_provider: true,
+            },
+        ),
+        ResumeModelOverrides {
+            model: Some("gemma-4-31b".to_string()),
+            model_provider: Some("cerebras".to_string()),
+        }
+    );
 }
 
 #[tokio::test]
