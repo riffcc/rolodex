@@ -161,6 +161,7 @@ async fn thread_settings_update(
         active_permission_profile,
         windows_sandbox_level,
         collaboration_mode: Some(collaboration_mode),
+        model_provider_id: None,
         reasoning_summary: summary,
         service_tier,
         personality,

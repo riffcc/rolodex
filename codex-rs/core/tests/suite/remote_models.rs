@@ -434,7 +434,9 @@ async fn namespaced_model_slug_uses_catalog_metadata_without_fallback_warning() 
         let event = wait_for_event(&codex, |_| true).await;
         match event {
             EventMsg::Warning(warning)
-                if warning.message.contains("Defaulting to fallback metadata") =>
+                if warning
+                    .message
+                    .contains("is not in the current provider catalog") =>
             {
                 fallback_warning_count += 1;
             }
