@@ -1974,7 +1974,7 @@ async fn warning_event_adds_warning_history_cell() {
 #[tokio::test]
 async fn repeated_model_metadata_warning_is_hidden_for_same_slug() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let warning = "Model metadata for `unknown-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.";
+    let warning = "Model `unknown-model` is not in the current provider catalog. Codex will try it with conservative defaults; if the provider rejects it, choose a supported model or switch providers.";
 
     handle_warning(&mut chat, warning);
     handle_warning(&mut chat, warning);

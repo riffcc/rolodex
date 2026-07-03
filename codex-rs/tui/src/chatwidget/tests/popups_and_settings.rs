@@ -2644,6 +2644,47 @@ async fn single_reasoning_option_skips_selection() {
 }
 
 #[tokio::test]
+async fn all_models_picker_enter_closes_for_model_without_reasoning_options() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    let preset = ModelPreset {
+        id: "provider-model-without-reasoning".to_string(),
+        model: "provider-model-without-reasoning".to_string(),
+        display_name: "provider-model-without-reasoning".to_string(),
+        description: "".to_string(),
+        default_reasoning_effort: ReasoningEffortConfig::Medium,
+        supported_reasoning_efforts: Vec::new(),
+        supports_personality: false,
+        additional_speed_tiers: Vec::new(),
+        service_tiers: Vec::new(),
+        default_service_tier: None,
+        is_default: false,
+        upgrade: None,
+        show_in_picker: true,
+        availability_nux: None,
+        supported_in_api: true,
+        input_modalities: default_input_modalities(),
+    };
+
+    chat.open_all_models_popup(vec![preset]);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(
+        !popup.contains("Select Model and Effort"),
+        "expected model picker to close after selecting a model without reasoning options"
+    );
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, AppEvent::OpenReasoningPopup { model } if model.model == "provider-model-without-reasoning")),
+        "expected selected model to apply through the reasoning popup event; events: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn feedback_selection_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

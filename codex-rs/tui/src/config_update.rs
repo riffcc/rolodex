@@ -17,6 +17,8 @@ use codex_app_server_protocol::SkillsConfigWriteParams;
 use codex_app_server_protocol::SkillsConfigWriteResponse;
 use codex_config::loader::project_trust_key;
 use codex_features::FEATURES;
+use codex_model_provider_info::CEREBRAS_PROVIDER_ID;
+use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::TrustLevel;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -71,10 +73,31 @@ pub(crate) fn build_model_selection_edits(
             )
         },
     );
-    vec![
+    let mut edits = vec![
         replace_config_value("model", serde_json::json!(model)),
         effort_edit,
-    ]
+    ];
+    if is_ollama_gemma4_model(model) {
+        edits.push(replace_config_value(
+            "model_provider",
+            serde_json::json!(OLLAMA_OSS_PROVIDER_ID),
+        ));
+        edits.push(build_oss_provider_edit(OLLAMA_OSS_PROVIDER_ID));
+    } else if is_cerebras_gemma4_model(model) {
+        edits.push(replace_config_value(
+            "model_provider",
+            serde_json::json!(CEREBRAS_PROVIDER_ID),
+        ));
+    }
+    edits
+}
+
+fn is_ollama_gemma4_model(model: &str) -> bool {
+    model == "gemma4:12b"
+}
+
+fn is_cerebras_gemma4_model(model: &str) -> bool {
+    model == "gemma-4-31b"
 }
 
 pub(crate) fn build_service_tier_selection_edits(service_tier: Option<&str>) -> Vec<ConfigEdit> {

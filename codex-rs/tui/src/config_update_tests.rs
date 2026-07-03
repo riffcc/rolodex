@@ -1,4 +1,6 @@
 use super::*;
+use codex_model_provider_info::CEREBRAS_PROVIDER_ID;
+use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use color_eyre::eyre::WrapErr;
 use pretty_assertions::assert_eq;
 use std::path::Path;
@@ -37,4 +39,51 @@ fn format_config_error_preserves_server_validation_message() {
         "config/batchWrite failed in TUI: config/batchWrite failed: Invalid configuration: \
          features.fast_mode=true violates managed requirements; allowed set [fast_mode=false]"
     );
+}
+
+#[test]
+fn gemma4_model_selection_persists_ollama_provider() {
+    let edits = build_model_selection_edits("gemma4:12b", Option::<String>::None);
+
+    let key_paths = edits
+        .iter()
+        .map(|edit| edit.key_path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        key_paths,
+        vec![
+            "model",
+            "model_reasoning_effort",
+            "model_provider",
+            "oss_provider"
+        ]
+    );
+    assert_eq!(edits[2].value, serde_json::json!(OLLAMA_OSS_PROVIDER_ID));
+    assert_eq!(edits[3].value, serde_json::json!(OLLAMA_OSS_PROVIDER_ID));
+}
+
+#[test]
+fn cerebras_gemma4_model_selection_persists_cerebras_provider() {
+    let edits = build_model_selection_edits("gemma-4-31b", Option::<String>::None);
+
+    let key_paths = edits
+        .iter()
+        .map(|edit| edit.key_path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        key_paths,
+        vec!["model", "model_reasoning_effort", "model_provider"]
+    );
+    assert_eq!(edits[2].value, serde_json::json!(CEREBRAS_PROVIDER_ID));
+}
+
+#[test]
+fn openai_model_selection_does_not_force_provider() {
+    let edits = build_model_selection_edits("gpt-5.4", Option::<String>::None);
+
+    let key_paths = edits
+        .iter()
+        .map(|edit| edit.key_path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(key_paths, vec!["model", "model_reasoning_effort"]);
 }
