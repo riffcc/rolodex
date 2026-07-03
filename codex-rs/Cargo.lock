@@ -4013,6 +4013,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "transcribe-rs",
+ "tui-math",
  "two-face",
  "unicode-segmentation",
  "unicode-width 0.2.1",
@@ -8696,6 +8697,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4345964bb142484797b161f473a503a434de77149dd8c7427788c6e13379388"
 
 [[package]]
+name = "latex2mathml"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "678cf5bdb3ba63a264e6e0c9eee36538ca1d2da0afa4dd801c1f96309e710765"
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11736,6 +11743,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
 name = "rtrb"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14353,6 +14366,21 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "termcolor",
+]
+
+[[package]]
+name = "tui-math"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0558d4aa9575ac20faa4dd50c5d1c0a7d6c300e87dd33e4fb4f49e4abb82f0b"
+dependencies = [
+ "crossterm",
+ "latex2mathml",
+ "once_cell",
+ "ratatui",
+ "roxmltree",
+ "unicode-segmentation",
+ "unicode-width 0.2.1",
 ]
 
 [[package]]

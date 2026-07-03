@@ -412,77 +412,163 @@ fn is_escaped(text: &str, index: usize) -> bool {
 }
 
 fn render_math_text(math: &str) -> String {
-    let mut rendered = math.trim().to_string();
-    for (latex, symbol) in LATEX_SYMBOLS {
-        rendered = rendered.replace(latex, symbol);
-    }
-    rendered
-        .replace("\\left", "")
-        .replace("\\right", "")
-        .replace("\\,", " ")
-        .replace("\\;", " ")
-        .replace("\\:", " ")
-        .replace("\\!", "")
+    let trimmed = math.trim();
+    let normalized = normalize_latex_for_tui_math(trimmed);
+    tui_math::render_latex(&normalized).unwrap_or_else(|_| render_compact_inline_math_text(trimmed))
 }
 
-const LATEX_SYMBOLS: &[(&str, &str)] = &[
-    ("\\alpha", "α"),
-    ("\\beta", "β"),
-    ("\\gamma", "γ"),
-    ("\\delta", "δ"),
-    ("\\epsilon", "ε"),
-    ("\\theta", "θ"),
-    ("\\lambda", "λ"),
-    ("\\mu", "μ"),
-    ("\\pi", "π"),
-    ("\\rho", "ρ"),
-    ("\\sigma", "σ"),
-    ("\\tau", "τ"),
-    ("\\phi", "φ"),
-    ("\\omega", "ω"),
-    ("\\Gamma", "Γ"),
-    ("\\Delta", "Δ"),
-    ("\\Theta", "Θ"),
-    ("\\Lambda", "Λ"),
-    ("\\Pi", "Π"),
-    ("\\Sigma", "Σ"),
-    ("\\Phi", "Φ"),
-    ("\\Omega", "Ω"),
-    ("\\times", "×"),
-    ("\\cdot", "·"),
-    ("\\pm", "±"),
-    ("\\mp", "∓"),
-    ("\\leq", "≤"),
-    ("\\le", "≤"),
-    ("\\geq", "≥"),
-    ("\\ge", "≥"),
-    ("\\neq", "≠"),
-    ("\\approx", "≈"),
-    ("\\infty", "∞"),
-    ("\\rightarrow", "→"),
-    ("\\leftarrow", "←"),
-    ("\\to", "→"),
-    ("\\Rightarrow", "⇒"),
-    ("\\Leftarrow", "⇐"),
-    ("\\iff", "⇔"),
-    ("\\in", "∈"),
-    ("\\notin", "∉"),
-    ("\\subseteq", "⊆"),
-    ("\\subset", "⊂"),
-    ("\\cup", "∪"),
-    ("\\cap", "∩"),
-    ("\\forall", "∀"),
-    ("\\exists", "∃"),
-    ("\\neg", "¬"),
-    ("\\land", "∧"),
-    ("\\lor", "∨"),
-    ("\\sum", "∑"),
-    ("\\prod", "∏"),
-    ("\\int", "∫"),
-    ("\\sqrt", "√"),
-    ("\\partial", "∂"),
-    ("\\nabla", "∇"),
-];
+fn render_inline_math_text(math: &str) -> String {
+    let rendered = render_math_text(math);
+    let lines = rendered
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    match lines.as_slice() {
+        [] => String::new(),
+        [line] => (*line).to_string(),
+        _ => render_compact_inline_math_text(math),
+    }
+}
+
+fn normalize_latex_for_tui_math(math: &str) -> String {
+    let compacted = math.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut normalized = compacted.replace("\\text{", "\\mathrm{");
+    normalized = replace_single_letter_command(&normalized, "\\mathcal{", mathcal_char);
+    replace_single_letter_command(&normalized, "\\mathbb{", mathbb_char)
+}
+
+fn replace_single_letter_command(
+    text: &str,
+    command: &str,
+    replacement: fn(char) -> Option<char>,
+) -> String {
+    let mut rendered = String::with_capacity(text.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = text[cursor..].find(command) {
+        let start = cursor + relative_start;
+        let argument_start = start + command.len();
+        rendered.push_str(&text[cursor..start]);
+
+        let mut chars = text[argument_start..].chars();
+        if let (Some(argument), Some('}')) = (chars.next(), chars.next())
+            && let Some(symbol) = replacement(argument)
+        {
+            rendered.push(symbol);
+            cursor = argument_start + argument.len_utf8() + 1;
+            continue;
+        }
+
+        rendered.push_str(command);
+        cursor = argument_start;
+    }
+
+    rendered.push_str(&text[cursor..]);
+    rendered
+}
+
+fn mathcal_char(ch: char) -> Option<char> {
+    match ch {
+        'A' => Some('𝒜'),
+        'B' => Some('ℬ'),
+        'C' => Some('𝒞'),
+        'D' => Some('𝒟'),
+        'E' => Some('ℰ'),
+        'F' => Some('ℱ'),
+        'G' => Some('𝒢'),
+        'H' => Some('ℋ'),
+        'I' => Some('ℐ'),
+        'J' => Some('𝒥'),
+        'K' => Some('𝒦'),
+        'L' => Some('ℒ'),
+        'M' => Some('ℳ'),
+        'N' => Some('𝒩'),
+        'O' => Some('𝒪'),
+        'P' => Some('𝒫'),
+        'Q' => Some('𝒬'),
+        'R' => Some('ℛ'),
+        'S' => Some('𝒮'),
+        'T' => Some('𝒯'),
+        'U' => Some('𝒰'),
+        'V' => Some('𝒱'),
+        'W' => Some('𝒲'),
+        'X' => Some('𝒳'),
+        'Y' => Some('𝒴'),
+        'Z' => Some('𝒵'),
+        _ => None,
+    }
+}
+
+fn mathbb_char(ch: char) -> Option<char> {
+    match ch {
+        'A' => Some('𝔸'),
+        'B' => Some('𝔹'),
+        'C' => Some('ℂ'),
+        'D' => Some('𝔻'),
+        'E' => Some('𝔼'),
+        'F' => Some('𝔽'),
+        'G' => Some('𝔾'),
+        'H' => Some('ℍ'),
+        'I' => Some('𝕀'),
+        'J' => Some('𝕁'),
+        'K' => Some('𝕂'),
+        'L' => Some('𝕃'),
+        'M' => Some('𝕄'),
+        'N' => Some('ℕ'),
+        'O' => Some('𝕆'),
+        'P' => Some('ℙ'),
+        'Q' => Some('ℚ'),
+        'R' => Some('ℝ'),
+        'S' => Some('𝕊'),
+        'T' => Some('𝕋'),
+        'U' => Some('𝕌'),
+        'V' => Some('𝕍'),
+        'W' => Some('𝕎'),
+        'X' => Some('𝕏'),
+        'Y' => Some('𝕐'),
+        'Z' => Some('ℤ'),
+        _ => None,
+    }
+}
+
+fn render_compact_inline_math_text(math: &str) -> String {
+    normalize_latex_for_tui_math(math.trim())
+        .replace("\\pi", "π")
+        .replace("\\alpha", "α")
+        .replace("\\beta", "β")
+        .replace("\\gamma", "γ")
+        .replace("\\delta", "δ")
+        .replace("\\theta", "θ")
+        .replace("\\lambda", "λ")
+        .replace("\\mu", "μ")
+        .replace("\\sigma", "σ")
+        .replace("\\omega", "ω")
+        .replace("\\times", "×")
+        .replace("\\cdot", "·")
+        .replace("\\leq", "≤")
+        .replace("\\geq", "≥")
+        .replace("\\neq", "≠")
+        .replace("\\infty", "∞")
+        .replace("\\to", "→")
+        .replace("\\in", "∈")
+        .replace("\\land", "∧")
+        .replace("\\lor", "∨")
+        .replace("\\left", "")
+        .replace("\\right", "")
+}
+
+fn looks_like_standalone_latex_math(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && !trimmed.contains('$')
+        && (trimmed.starts_with('\\')
+            || trimmed.starts_with('∀')
+            || trimmed.starts_with('∃')
+            || trimmed.starts_with('∑')
+            || trimmed.starts_with('∫'))
+        && trimmed.contains('\\')
+}
 
 /// Stateful pulldown-cmark event consumer that builds styled `ratatui` output.
 ///
@@ -509,6 +595,7 @@ where
     in_paragraph: bool,
     in_code_block: bool,
     in_display_math: bool,
+    display_math_buffer: String,
     code_block_lang: Option<String>,
     code_block_buffer: String,
     wrap_width: Option<usize>,
@@ -544,6 +631,7 @@ where
             in_paragraph: false,
             in_code_block: false,
             in_display_math: false,
+            display_math_buffer: String::new(),
             code_block_lang: None,
             code_block_buffer: String::new(),
             wrap_width,
@@ -562,6 +650,9 @@ where
     fn run(&mut self) {
         while let Some((ev, range)) = self.iter.next() {
             self.handle_event(ev, range);
+        }
+        if self.in_display_math {
+            self.finish_display_math_block();
         }
         self.flush_current_line();
     }
@@ -1189,7 +1280,7 @@ where
                 MathTextSegment::Text(text) => self.push_text_spans_to_table_cell(text, style),
                 MathTextSegment::Math(math) => {
                     self.push_span_to_table_cell(Span::styled(
-                        render_math_text(math),
+                        render_inline_math_text(math),
                         self.styles.math,
                     ));
                 }
@@ -1205,10 +1296,14 @@ where
         let trimmed = line.trim();
         if self.in_display_math {
             if trimmed == "$$" {
-                self.in_display_math = false;
+                self.finish_display_math_block();
+                self.needs_newline = true;
+            } else if let Some(math) = trimmed.strip_suffix("$$") {
+                self.push_display_math_fragment(math.trim());
+                self.finish_display_math_block();
                 self.needs_newline = true;
             } else {
-                self.push_display_math_line(trimmed);
+                self.push_display_math_fragment(trimmed);
             }
             return true;
         }
@@ -1220,6 +1315,7 @@ where
             }
             self.flush_current_line();
             self.in_display_math = true;
+            self.display_math_buffer.clear();
             return true;
         }
 
@@ -1237,15 +1333,58 @@ where
             return true;
         }
 
+        if let Some(math) = trimmed.strip_prefix("$$") {
+            if self.needs_newline {
+                self.push_blank_line();
+                self.needs_newline = false;
+            }
+            self.flush_current_line();
+            self.in_display_math = true;
+            self.display_math_buffer.clear();
+            self.push_display_math_fragment(math.trim());
+            return true;
+        }
+
+        if looks_like_standalone_latex_math(trimmed) {
+            if self.needs_newline {
+                self.push_blank_line();
+                self.needs_newline = false;
+            }
+            self.push_display_math_line(trimmed);
+            self.needs_newline = true;
+            return true;
+        }
+
         false
+    }
+
+    fn push_display_math_fragment(&mut self, math: &str) {
+        if math.is_empty() {
+            return;
+        }
+        if !self.display_math_buffer.is_empty() {
+            self.display_math_buffer.push(' ');
+        }
+        self.display_math_buffer.push_str(math);
+    }
+
+    fn finish_display_math_block(&mut self) {
+        self.in_display_math = false;
+        let math = std::mem::take(&mut self.display_math_buffer);
+        if !math.trim().is_empty() {
+            self.push_display_math_line(math.trim());
+        }
     }
 
     fn push_display_math_line(&mut self, math: &str) {
         self.flush_current_line();
-        self.push_line(Line::from(Span::styled(
-            render_math_text(math),
-            self.styles.display_math,
-        )));
+        let rendered = render_math_text(math);
+        for line in rendered.lines() {
+            self.push_line(Line::from(Span::styled(
+                line.to_string(),
+                self.styles.display_math,
+            )));
+        }
         self.flush_current_line();
     }
 
@@ -2159,7 +2298,10 @@ where
             match segment {
                 MathTextSegment::Text(text) => self.push_text_spans(text, style),
                 MathTextSegment::Math(math) => {
-                    self.push_span(Span::styled(render_math_text(math), self.styles.math));
+                    self.push_span(Span::styled(
+                        render_inline_math_text(math),
+                        self.styles.math,
+                    ));
                 }
             }
         }

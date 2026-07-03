@@ -162,20 +162,83 @@ fn inline_latex_math_renders_as_styled_math_text() {
 }
 
 #[test]
+fn inline_mathcal_renders_compact_script_letters() {
+    let text = render_markdown_text(
+        "Let $\\mathcal{D}_X$ and $\\mathcal{T}_B$ witness $\\mathcal{D}B$.",
+    );
+
+    assert_eq!(plain_lines(&text), vec!["Let 𝒟_X and 𝒯_B witness 𝒟B."]);
+    let math_spans = text.lines[0]
+        .spans
+        .iter()
+        .filter(|span| span.style.fg == Some(Color::Magenta))
+        .map(|span| span.content.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(math_spans, vec!["𝒟_X", "𝒯_B", "𝒟B"]);
+}
+
+#[test]
 fn display_latex_math_block_renders_without_delimiters() {
     let text = render_markdown_text("Before\n\n$$\n\\sum_{i=1}^n i\n$$\n\nAfter");
 
     assert_eq!(
         plain_lines(&text),
-        vec!["Before", "", "", "∑_{i=1}^n i", "", "After"]
+        vec!["Before", "", "", "  n", "  ∑   i", "i = 1", "", "After"]
     );
     let math_span = text.lines[3]
         .spans
         .iter()
-        .find(|span| span.content.as_ref() == "∑_{i=1}^n i")
+        .find(|span| span.content.as_ref() == "  n")
         .expect("display math span should render separately");
     assert_eq!(math_span.style.fg, Some(Color::Magenta));
     assert!(math_span.style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn standalone_latex_equation_line_renders_as_display_math() {
+    let text = render_markdown_text("\\mathcal{K} \\equiv \\frac{a}{b}");
+
+    let lines = plain_lines(&text);
+    assert!(
+        lines.iter().any(|line| line.contains('𝒦')),
+        "standalone equation should be rendered through the math renderer: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains('─')),
+        "fraction should render as terminal math layout: {lines:?}"
+    );
+    assert!(
+        text.lines.iter().all(|line| line
+            .spans
+            .iter()
+            .all(|span| span.style.fg == Some(Color::Magenta))),
+        "standalone equation spans should use display math styling"
+    );
+}
+
+#[test]
+fn display_latex_math_block_collapses_model_wrapped_text_commands() {
+    let text = render_markdown_text(
+        "$$\\text{Recv}_{\\text{Alice}}(\\mathcal{T}B) \\implies (\\text{Possess}{\\text{Alice}}(\\mathcal{D}_A, \\mathcal{D}B) \\land \\text{Possess}\n  {\\text{Bob}}(\\mathcal{D}_A, \\mathcal{D}_B))$$",
+    );
+
+    let lines = plain_lines(&text);
+    assert!(
+        lines.iter().all(|line| !line.contains("PARSE ERROR")),
+        "wrapped display equation should render without parse errors: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains('𝒯')),
+        "mathcal T should render as a script letter: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Possess")),
+        "text commands should survive display rendering: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Bob")),
+        "text command split across a model-wrapped line should render: {lines:?}"
+    );
 }
 
 #[test]

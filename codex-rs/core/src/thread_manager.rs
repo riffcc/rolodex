@@ -664,6 +664,9 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
     ) -> CodexResult<NewThread> {
         let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
+        let interrupted_marker = resumed_history_interrupted_marker(&config, &initial_history);
+        let initial_history =
+            resume_history_from_rollout_snapshot(initial_history, interrupted_marker);
         Box::pin(self.resume_thread_with_history(
             config,
             initial_history,
@@ -741,6 +744,9 @@ impl ThreadManager {
         user_shell_override: crate::shell::Shell,
     ) -> CodexResult<NewThread> {
         let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
+        let interrupted_marker = resumed_history_interrupted_marker(&config, &initial_history);
+        let initial_history =
+            resume_history_from_rollout_snapshot(initial_history, interrupted_marker);
         let environments = default_thread_environment_selections(
             self.state.environment_manager.as_ref(),
             &config.cwd,
@@ -1578,12 +1584,44 @@ fn fork_history_from_snapshot(
                     history,
                     snapshot_state.active_turn_id,
                     interrupted_marker,
+                    ResumedBoundaryMode::Fork,
                 )
             } else {
                 history
             }
         }
     }
+}
+
+fn resumed_history_interrupted_marker(
+    config: &Config,
+    initial_history: &InitialHistory,
+) -> InterruptedTurnHistoryMarker {
+    let multi_agent_version = resolve_multi_agent_version(initial_history, None)
+        .unwrap_or_else(|| config.multi_agent_version_from_features());
+    InterruptedTurnHistoryMarker::from_config_and_version(config, multi_agent_version)
+}
+
+fn resume_history_from_rollout_snapshot(
+    history: InitialHistory,
+    interrupted_marker: InterruptedTurnHistoryMarker,
+) -> InitialHistory {
+    let snapshot_state = snapshot_turn_state(&history);
+    if snapshot_state.ends_mid_turn {
+        append_interrupted_boundary(
+            history,
+            snapshot_state.active_turn_id,
+            interrupted_marker,
+            ResumedBoundaryMode::Preserve,
+        )
+    } else {
+        history
+    }
+}
+
+enum ResumedBoundaryMode {
+    Preserve,
+    Fork,
 }
 
 /// Append the same persisted interrupt boundary used by the live interrupt path
@@ -1593,6 +1631,7 @@ fn append_interrupted_boundary(
     history: InitialHistory,
     turn_id: Option<String>,
     interrupted_marker: InterruptedTurnHistoryMarker,
+    resumed_mode: ResumedBoundaryMode,
 ) -> InitialHistory {
     let aborted_event = RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
         turn_id,
@@ -1622,7 +1661,10 @@ fn append_interrupted_boundary(
                 resumed.history.push(RolloutItem::ResponseItem(marker));
             }
             resumed.history.push(aborted_event);
-            InitialHistory::Forked(resumed.history)
+            match resumed_mode {
+                ResumedBoundaryMode::Preserve => InitialHistory::Resumed(resumed),
+                ResumedBoundaryMode::Fork => InitialHistory::Forked(resumed.history),
+            }
         }
     }
 }

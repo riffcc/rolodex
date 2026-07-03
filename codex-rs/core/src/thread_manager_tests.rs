@@ -888,6 +888,7 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
                 committed_history,
                 /*turn_id*/ None,
                 InterruptedTurnHistoryMarker::ContextualUser,
+                ResumedBoundaryMode::Fork,
             )
             .get_rollout_items()
         )
@@ -910,6 +911,7 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
                 InitialHistory::New,
                 /*turn_id*/ None,
                 InterruptedTurnHistoryMarker::ContextualUser,
+                ResumedBoundaryMode::Fork,
             )
             .get_rollout_items()
         )
@@ -938,6 +940,7 @@ fn disabled_interrupted_fork_snapshot_appends_only_interrupt_event() {
                 committed_history,
                 /*turn_id*/ None,
                 InterruptedTurnHistoryMarker::Disabled,
+                ResumedBoundaryMode::Fork,
             )
             .get_rollout_items()
         )
@@ -959,6 +962,7 @@ fn disabled_interrupted_fork_snapshot_appends_only_interrupt_event() {
                 InitialHistory::New,
                 /*turn_id*/ None,
                 InterruptedTurnHistoryMarker::Disabled,
+                ResumedBoundaryMode::Fork,
             )
             .get_rollout_items()
         )
@@ -1392,6 +1396,63 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
     );
     assert_eq!(
         reforked_rollout_items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+                        reason: TurnAbortReason::Interrupted,
+                        ..
+                    }))
+                )
+            })
+            .count(),
+        1,
+    );
+}
+
+#[test]
+fn resume_history_from_rollout_snapshot_preserves_resumed_thread_and_interrupts_mid_turn() {
+    let thread_id = ThreadId::new();
+    let rollout_path = PathBuf::from("rollout.jsonl");
+    let history = InitialHistory::Resumed(ResumedHistory {
+        conversation_id: thread_id,
+        history: vec![
+            RolloutItem::ResponseItem(user_msg("hello")),
+            RolloutItem::ResponseItem(assistant_msg("partial")),
+        ],
+        rollout_path: Some(rollout_path.clone()),
+    });
+
+    assert!(snapshot_turn_state(&history).ends_mid_turn);
+
+    let history =
+        resume_history_from_rollout_snapshot(history, InterruptedTurnHistoryMarker::ContextualUser);
+    assert!(!snapshot_turn_state(&history).ends_mid_turn);
+
+    let InitialHistory::Resumed(resumed) = history else {
+        panic!("resume snapshot should preserve resumed history");
+    };
+    assert_eq!(resumed.conversation_id, thread_id);
+    assert_eq!(resumed.rollout_path, Some(rollout_path));
+
+    let rollout_items = resumed.history;
+    let interrupted_marker_json = serde_json::to_value(RolloutItem::ResponseItem(
+        contextual_user_interrupted_marker(),
+    ))
+    .expect("serialize interrupted marker");
+    assert_eq!(
+        rollout_items
+            .iter()
+            .filter(|item| {
+                serde_json::to_value(item).expect("serialize resumed rollout item")
+                    == interrupted_marker_json
+            })
+            .count(),
+        1,
+    );
+    assert_eq!(
+        rollout_items
             .iter()
             .filter(|item| {
                 matches!(
