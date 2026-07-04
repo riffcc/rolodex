@@ -2420,6 +2420,44 @@ async fn raw_slash_command_reports_usage_for_invalid_arg() {
 }
 
 #[tokio::test]
+async fn lcs_slash_command_toggles_and_accepts_hidden_visible_args() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    // The LCS substrate (MCP tool calls) is visible by default.
+    assert!(chat.show_lcs_substrate());
+
+    chat.dispatch_command_with_args(SlashCommand::Lcs, "hidden".to_string(), Vec::new());
+    assert!(!chat.show_lcs_substrate());
+
+    chat.dispatch_command_with_args(SlashCommand::Lcs, "visible".to_string(), Vec::new());
+    assert!(chat.show_lcs_substrate());
+
+    // Bare `/lcs` toggles.
+    chat.dispatch_command(SlashCommand::Lcs);
+    assert!(!chat.show_lcs_substrate());
+}
+
+#[tokio::test]
+async fn lcs_slash_command_reports_usage_for_invalid_arg() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Lcs, "status".to_string(), Vec::new());
+
+    // Unchanged.
+    assert!(chat.show_lcs_substrate());
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Usage: /lcs [hidden|visible]"),
+        "expected lcs usage error, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
 async fn compact_queues_user_messages_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());

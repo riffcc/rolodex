@@ -535,6 +535,9 @@ pub(crate) struct ChatWidget {
     transcript: TranscriptState,
     config: Config,
     raw_output_mode: bool,
+    /// Whether the LCS substrate (MCP tool calls) is rendered as it runs.
+    /// True by default; `/lcs hidden` sets it false.
+    show_lcs_substrate: bool,
     /// Runtime value resolved by core. `config.service_tier` remains the explicit user choice.
     effective_service_tier: Option<String>,
     /// The unmasked collaboration mode settings (always Default mode).
@@ -1661,6 +1664,38 @@ impl ChatWidget {
     pub(crate) fn toggle_raw_output_mode_and_notify(&mut self) -> bool {
         let enabled = !self.raw_output_mode;
         self.set_raw_output_mode_and_notify(enabled);
+        enabled
+    }
+
+    /// Whether MCP tool calls are rendered as they run.
+    pub(crate) fn show_lcs_substrate(&self) -> bool {
+        self.show_lcs_substrate
+    }
+
+    pub(crate) fn set_lcs_substrate(&mut self, enabled: bool) {
+        self.show_lcs_substrate = enabled;
+        self.refresh_status_surfaces();
+    }
+
+    pub(crate) fn lcs_substrate_notice(enabled: bool) -> &'static str {
+        if enabled {
+            "LCS substrate visible: MCP tool calls are shown as they run."
+        } else {
+            "LCS substrate hidden: MCP tool calls run silently."
+        }
+    }
+
+    pub(crate) fn set_lcs_substrate_and_notify(&mut self, enabled: bool) {
+        self.set_lcs_substrate(enabled);
+        self.add_info_message(
+            Self::lcs_substrate_notice(enabled).to_string(),
+            /*hint*/ None,
+        );
+    }
+
+    pub(crate) fn toggle_lcs_substrate_and_notify(&mut self) -> bool {
+        let enabled = !self.show_lcs_substrate;
+        self.set_lcs_substrate_and_notify(enabled);
         enabled
     }
 
