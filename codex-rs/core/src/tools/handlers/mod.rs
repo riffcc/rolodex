@@ -24,6 +24,7 @@ mod search;
 pub(crate) mod search_spec;
 mod shell;
 pub(crate) mod shell_spec;
+mod smart_path;
 mod smart_read;
 pub(crate) mod smart_read_spec;
 mod smart_search;

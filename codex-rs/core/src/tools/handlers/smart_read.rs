@@ -13,6 +13,8 @@ use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::resolve_tool_environment;
+use crate::tools::handlers::smart_path::canonicalize_path;
+use crate::tools::handlers::smart_path::resolve_existing_path;
 use crate::tools::handlers::smart_read_spec::SmartReadToolOptions;
 use crate::tools::handlers::smart_read_spec::create_smart_read_tool;
 use crate::tools::registry::CoreToolRuntime;
@@ -104,9 +106,8 @@ impl ToolExecutor<ToolInvocation> for SmartReadHandler {
             ));
         }
 
-        let project_root = canonicalize(environment.cwd.as_path(), "project root")?;
-        let requested_path = environment.cwd.join(&args.path);
-        let path = canonicalize(requested_path.as_path(), "source file")?;
+        let project_root = canonicalize_path(environment.cwd.as_path(), "project root")?;
+        let path = resolve_existing_path(&project_root, &args.path, "source file")?;
         if !path.starts_with(&project_root) {
             return Err(FunctionCallError::RespondToModel(format!(
                 "smart_read path `{}` is outside project root `{}`",
@@ -136,15 +137,6 @@ impl ToolExecutor<ToolInvocation> for SmartReadHandler {
 }
 
 impl CoreToolRuntime for SmartReadHandler {}
-
-fn canonicalize(path: &std::path::Path, label: &str) -> Result<PathBuf, FunctionCallError> {
-    path.canonicalize().map_err(|err| {
-        FunctionCallError::RespondToModel(format!(
-            "unable to resolve {label} `{}`: {err}",
-            path.display()
-        ))
-    })
-}
 
 fn read_with_sdk(
     project_root: PathBuf,
