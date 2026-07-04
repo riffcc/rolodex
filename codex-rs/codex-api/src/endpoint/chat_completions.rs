@@ -274,10 +274,23 @@ fn translate_input_to_chat_messages(
                 "tool_call_id": call_id,
                 "content": output.body.to_text().unwrap_or_default(),
             })),
+            // tool_search results ride back to the model as a tool message so
+            // the discovered schemas are visible on the next chat turn. The
+            // matching assistant tool_call is the FunctionCall rendered above
+            // (chat-completions wire flattens ToolSearchCall into a function call).
+            ResponseItem::ToolSearchOutput {
+                call_id, tools, ..
+            } => {
+                let content = serde_json::to_string(tools).unwrap_or_else(|_| "[]".to_string());
+                Some(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id.as_deref().unwrap_or(""),
+                    "content": content,
+                }))
+            }
             ResponseItem::AgentMessage { .. }
             | ResponseItem::Reasoning { .. }
             | ResponseItem::ToolSearchCall { .. }
-            | ResponseItem::ToolSearchOutput { .. }
             | ResponseItem::WebSearchCall { .. }
             | ResponseItem::ImageGenerationCall { .. }
             | ResponseItem::Compaction { .. }
@@ -532,6 +545,44 @@ fn translate_tool_to_chat_tools(tool: Value) -> Result<Vec<Value>, ApiError> {
             );
             Ok(Vec::new())
         }
+        // The model-visible discovery tool. Chat-completions wire has no native
+        // `tool_search`, so surface it as a plain function. The router maps a
+        // function call named `tool_search` back to the search handler (see
+        // `ToolRouter::build_tool_call`), and `ToolSearchOutput` is rendered
+        // back as a tool result below — closing the discovery loop over chat wire.
+        "tool_search" => {
+            let description = tool
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let parameters = tool.get("parameters").cloned().unwrap_or_else(|| {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query for deferred tools."
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum number of tools to return."
+                        }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                })
+            });
+            Ok(vec![chat_function_tool(
+                Value::String("tool_search".to_string()),
+                if description.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(description.to_string())
+                },
+                parameters,
+                Value::Bool(false),
+            )])
+        }
         unsupported => Err(ApiError::InvalidRequest {
             message: format!(
                 "wire_api=\"chat\" cannot translate Responses tool type `{unsupported}` yet"
@@ -625,6 +676,96 @@ mod tests {
         assert_eq!(tools[1]["function"]["name"], json!("echo"));
         assert_eq!(body["tool_choice"], json!("auto"));
         assert_eq!(body["parallel_tool_calls"], json!(true));
+    }
+
+    #[test]
+    fn chat_compatibility_translates_tool_search_as_a_function_tool() {
+        let request = ResponsesApiRequest {
+            model: "chat-model".to_string(),
+            instructions: "system".to_string(),
+            input: Vec::new(),
+            tools: vec![json!({
+                "type": "tool_search",
+                "execution": "client",
+                "description": "# Tool discovery\n\nSearches deferred tools.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query for deferred tools."},
+                        "limit": {"type": "number", "description": "Maximum number of tools to return."}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }
+            })],
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: true,
+            reasoning: None,
+            store: false,
+            stream: true,
+            include: Vec::new(),
+            service_tier: None,
+            prompt_cache_key: None,
+            text: None,
+            client_metadata: None,
+        };
+
+        let body = translate_responses_request_to_chat_body(request).expect("tool_search translates");
+        let tools = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], json!("function"));
+        assert_eq!(tools[0]["function"]["name"], json!("tool_search"));
+        assert_eq!(
+            tools[0]["function"]["parameters"]["required"],
+            json!(["query"])
+        );
+        // The discovery description is preserved so the model knows how to use it.
+        assert!(tools[0]["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Tool discovery"));
+    }
+
+    #[test]
+    fn chat_compatibility_renders_tool_search_round_trip_as_tool_messages() {
+        // Over chat wire the model's tool_search call arrives as a FunctionCall
+        // and the search result as a ToolSearchOutput. Both must render so the
+        // model sees the call and the discovered schemas on the next turn.
+        let input = vec![
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "tool_search".to_string(),
+                namespace: None,
+                arguments: r#"{"query":"drive"}"#.to_string(),
+                call_id: "call_1".to_string(),
+            },
+            ResponseItem::ToolSearchOutput {
+                call_id: Some("call_1".to_string()),
+                status: "completed".to_string(),
+                execution: "client".to_string(),
+                tools: vec![json!({"type":"function","name":"search_drive"})],
+            },
+        ];
+        let messages = super::translate_input_to_chat_messages("", &input)
+            .expect("input translates");
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant tool_call message");
+        assert_eq!(
+            assistant["tool_calls"][0]["function"]["name"],
+            json!("tool_search")
+        );
+        assert_eq!(assistant["tool_calls"][0]["id"], json!("call_1"));
+        let tool_msg = messages
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("tool result message");
+        assert_eq!(tool_msg["tool_call_id"], json!("call_1"));
+        assert!(tool_msg["content"]
+            .as_str()
+            .unwrap()
+            .contains("search_drive"));
     }
 
     #[test]
