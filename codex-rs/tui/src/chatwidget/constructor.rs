@@ -106,6 +106,9 @@ impl ChatWidget {
             }),
             transcript: TranscriptState::new(active_cell),
             raw_output_mode: config.tui_raw_output_mode,
+            // The LCS substrate (MCP tool calls) is visible by default.
+            // `/lcs hidden` opts out.
+            show_lcs_substrate: true,
             config,
             effective_service_tier,
             skills_all: Vec::new(),

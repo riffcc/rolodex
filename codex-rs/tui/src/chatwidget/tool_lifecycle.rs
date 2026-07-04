@@ -50,19 +50,16 @@ impl ChatWidget {
     }
 
     pub(super) fn on_mcp_tool_call_started(&mut self, item: ThreadItem) {
-        let item2 = item.clone();
-        self.defer_or_handle(
-            |q| q.push_item_started(item),
-            |s| s.handle_mcp_tool_call_started_now(item2),
-        );
+        // Render MCP tool calls as they start, rather than batching them into
+        // the interrupt queue until the stream cycle ends. Flush pending
+        // interrupts first to preserve ordering, then handle immediately.
+        self.flush_interrupt_queue();
+        self.handle_mcp_tool_call_started_now(item);
     }
 
     pub(super) fn on_mcp_tool_call_completed(&mut self, item: ThreadItem) {
-        let item2 = item.clone();
-        self.defer_or_handle(
-            |q| q.push_item_completed(item),
-            |s| s.handle_mcp_tool_call_completed_now(item2),
-        );
+        self.flush_interrupt_queue();
+        self.handle_mcp_tool_call_completed_now(item);
     }
 
     pub(super) fn on_web_search_begin(&mut self, call_id: String) {
@@ -159,6 +156,9 @@ impl ChatWidget {
 
     pub(crate) fn handle_mcp_tool_call_started_now(&mut self, item: ThreadItem) {
         self.record_visible_turn_activity();
+        if !self.show_lcs_substrate {
+            return;
+        }
         let ThreadItem::McpToolCall {
             id,
             server,
@@ -186,6 +186,10 @@ impl ChatWidget {
 
     pub(crate) fn handle_mcp_tool_call_completed_now(&mut self, item: ThreadItem) {
         self.flush_answer_stream_with_separator();
+        self.transcript.had_work_activity = true;
+        if !self.show_lcs_substrate {
+            return;
+        }
 
         let ThreadItem::McpToolCall {
             id,

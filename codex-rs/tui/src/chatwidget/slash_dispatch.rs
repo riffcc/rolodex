@@ -35,6 +35,7 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
+const LCS_USAGE: &str = "Usage: /lcs [hidden|visible]";
 
 impl ChatWidget {
     /// Dispatch a bare slash command and record its staged local-history entry.
@@ -374,6 +375,9 @@ impl ChatWidget {
                 let enabled = self.toggle_raw_output_mode_and_notify();
                 self.emit_raw_output_mode_changed(enabled);
             }
+            SlashCommand::Lcs => {
+                self.toggle_lcs_substrate_and_notify();
+            }
             SlashCommand::Diff => {
                 self.add_diff_in_progress();
                 let tx = self.app_event_tx.clone();
@@ -668,6 +672,11 @@ impl ChatWidget {
                     self.emit_raw_output_mode_changed(/*enabled*/ false);
                 }
                 _ => self.add_error_message(RAW_USAGE.to_string()),
+            },
+            SlashCommand::Lcs => match trimmed.to_ascii_lowercase().as_str() {
+                "hidden" => self.set_lcs_substrate_and_notify(/*enabled*/ false),
+                "visible" => self.set_lcs_substrate_and_notify(/*enabled*/ true),
+                _ => self.add_error_message(LCS_USAGE.to_string()),
             },
             SlashCommand::Rename if !trimmed.is_empty() => {
                 if !self.ensure_thread_rename_allowed() {
@@ -996,6 +1005,7 @@ impl ChatWidget {
             | SlashCommand::Rollout
             | SlashCommand::Copy
             | SlashCommand::Raw
+            | SlashCommand::Lcs
             | SlashCommand::Vim
             | SlashCommand::Diff
             | SlashCommand::App
