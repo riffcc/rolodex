@@ -14,6 +14,8 @@ use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::resolve_tool_environment;
+use crate::tools::handlers::smart_path::canonicalize_path;
+use crate::tools::handlers::smart_path::resolve_existing_path;
 use crate::tools::handlers::smart_write_spec::SmartWriteToolOptions;
 use crate::tools::handlers::smart_write_spec::create_smart_write_tool;
 use crate::tools::registry::CoreToolRuntime;
@@ -88,9 +90,8 @@ impl ToolExecutor<ToolInvocation> for SmartWriteHandler {
             ));
         }
 
-        let project_root = canonicalize(environment.cwd.as_path(), "project root")?;
-        let requested_path = environment.cwd.join(&args.path);
-        let path = canonicalize(requested_path.as_path(), "source file")?;
+        let project_root = canonicalize_path(environment.cwd.as_path(), "project root")?;
+        let path = resolve_existing_path(&project_root, &args.path, "source file")?;
         validate_file_inside_root(&project_root, &path, "smart_write")?;
 
         let output = tokio::task::spawn_blocking(move || write_with_sdk(project_root, path, args))
@@ -107,15 +108,6 @@ impl ToolExecutor<ToolInvocation> for SmartWriteHandler {
 }
 
 impl CoreToolRuntime for SmartWriteHandler {}
-
-fn canonicalize(path: &Path, label: &str) -> Result<PathBuf, FunctionCallError> {
-    path.canonicalize().map_err(|err| {
-        FunctionCallError::RespondToModel(format!(
-            "unable to resolve {label} `{}`: {err}",
-            path.display()
-        ))
-    })
-}
 
 fn validate_file_inside_root(
     project_root: &Path,
