@@ -172,6 +172,33 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
 }
 
 #[tokio::test]
+async fn build_tool_call_routes_chat_wire_tool_search_to_search_handler() -> anyhow::Result<()> {
+    // Over chat-completions wire the model's tool_search call arrives as a
+    // FunctionCall (the translator flattens it). The router must route it to
+    // the search handler — the same payload a native ToolSearchCall produces.
+    let call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
+        id: None,
+        name: "tool_search".to_string(),
+        namespace: None,
+        arguments: r#"{"query":"calendar","limit":3}"#.to_string(),
+        call_id: "call-search".to_string(),
+    })?
+    .expect("chat-wire tool_search should produce a tool call");
+
+    assert_eq!(call.tool_name, ToolName::plain("tool_search"));
+    assert_eq!(call.call_id, "call-search");
+    match call.payload {
+        ToolPayload::ToolSearch { arguments } => {
+            assert_eq!(arguments.query, "calendar");
+            assert_eq!(arguments.limit, Some(3));
+        }
+        other => panic!("expected tool_search payload, got {other:?}"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn mcp_parallel_support_uses_handler_data() -> anyhow::Result<()> {
     let (_, turn) = make_session_and_context().await;
     let router = ToolRouter::from_turn_context(

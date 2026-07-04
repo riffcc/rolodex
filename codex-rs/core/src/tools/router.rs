@@ -102,6 +102,25 @@ impl ToolRouter {
                 call_id,
                 ..
             } => {
+                // Chat-completions wire flattens `tool_search` into a function
+                // call (see codex-api chat_completions translator). Route it
+                // back to the search handler so discovery works over chat wire
+                // too — the same payload the native ToolSearchCall produces.
+                if namespace.is_none() && name == "tool_search" {
+                    let value = serde_json::from_str::<serde_json::Value>(&arguments)
+                        .unwrap_or(serde_json::Value::Null);
+                    let arguments: SearchToolCallParams =
+                        serde_json::from_value(value).map_err(|err| {
+                            FunctionCallError::RespondToModel(format!(
+                                "failed to parse tool_search arguments: {err}"
+                            ))
+                        })?;
+                    return Ok(Some(ToolCall {
+                        tool_name: ToolName::plain("tool_search"),
+                        call_id,
+                        payload: ToolPayload::ToolSearch { arguments },
+                    }));
+                }
                 let tool_name = ToolName::new(namespace, name);
                 Ok(Some(ToolCall {
                     tool_name,
