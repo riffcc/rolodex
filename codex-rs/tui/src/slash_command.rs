@@ -37,6 +37,8 @@ pub enum SlashCommand {
     Init,
     Compact,
     Plan,
+    /// Switch to Auto mode — autonomous agentic loop (bijective climber).
+    Auto,
     Goal,
     Agent,
     Side,
@@ -126,6 +128,7 @@ impl SlashCommand {
             SlashCommand::Realtime => "toggle realtime voice mode (experimental)",
             SlashCommand::Settings => "configure realtime microphone/speaker",
             SlashCommand::Plan => "switch to Plan mode",
+            SlashCommand::Auto => "switch to Auto mode (autonomous loop)",
             SlashCommand::Goal => "set or view the goal for a long-running task",
             SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
             SlashCommand::Side | SlashCommand::Btw => {
@@ -163,6 +166,7 @@ impl SlashCommand {
             SlashCommand::Review
                 | SlashCommand::Rename
                 | SlashCommand::Plan
+                | SlashCommand::Auto
                 | SlashCommand::Goal
                 | SlashCommand::Ide
                 | SlashCommand::Keymap
@@ -211,6 +215,7 @@ impl SlashCommand {
             | SlashCommand::Memories
             | SlashCommand::Review
             | SlashCommand::Plan
+            | SlashCommand::Auto
             | SlashCommand::Clear
             | SlashCommand::Logout
             | SlashCommand::MemoryDrop
