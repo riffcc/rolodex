@@ -1,10 +1,12 @@
 mod additional_context;
+mod agentic_climb;
 mod auto_compact_window;
 mod service;
 mod session;
 mod turn;
 
 pub(crate) use additional_context::AdditionalContextStore;
+pub(crate) use agentic_climb::AgenticClimbState;
 pub(crate) use auto_compact_window::AutoCompactWindowSnapshot;
 pub(crate) use service::SessionServices;
 pub(crate) use session::SessionState;

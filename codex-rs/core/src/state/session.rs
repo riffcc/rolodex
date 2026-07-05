@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 
 use super::AdditionalContextStore;
+use super::AgenticClimbState;
 use super::auto_compact_window::AutoCompactWindow;
 use super::auto_compact_window::AutoCompactWindowSnapshot;
 use crate::context_manager::ContextManager;
@@ -40,6 +41,9 @@ pub(crate) struct SessionState {
     pub(crate) pending_session_start_sources: VecDeque<codex_hooks::SessionStartSource>,
     granted_permissions_by_environment_id: HashMap<String, AdditionalPermissionProfile>,
     next_turn_is_first: bool,
+    /// Agentic-mode climber guard brain. Only consulted when the turn runs in
+    /// `ModeKind::Agentic`; inert otherwise.
+    pub(crate) agentic_climb: AgenticClimbState,
 }
 
 impl SessionState {
@@ -60,6 +64,7 @@ impl SessionState {
             pending_session_start_sources: VecDeque::new(),
             granted_permissions_by_environment_id: HashMap::new(),
             next_turn_is_first: true,
+            agentic_climb: AgenticClimbState::default(),
         }
     }
 

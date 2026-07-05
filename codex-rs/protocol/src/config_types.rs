@@ -575,6 +575,10 @@ pub enum AltScreenMode {
 #[serde(rename_all = "snake_case")]
 pub enum ModeKind {
     Plan,
+    /// Autonomous agentic mode — a bijective climber. The agent runs
+    /// continuously, declaring its cognitive phase each turn; a climber guard
+    /// halts the loop when a turn produces no new state (anti-ralph).
+    Agentic,
     #[default]
     #[serde(
         alias = "code",
@@ -601,6 +605,7 @@ impl ModeKind {
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Plan => "Plan",
+            Self::Agentic => "Agentic",
             Self::Default => "Default",
             Self::PairProgramming => "Pair Programming",
             Self::Execute => "Execute",

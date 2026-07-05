@@ -184,6 +184,7 @@ pub(crate) async fn run_turn(
 
     let mut last_agent_message: Option<String> = None;
     let mut stop_hook_active = false;
+    let agentic = turn_context.collaboration_mode.mode == ModeKind::Agentic;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(
@@ -200,6 +201,11 @@ pub(crate) async fn run_turn(
     // 2. After auto-compact, when model/tool continuation needs to resume before any steer.
 
     loop {
+        // Agentic-mode climber guard: reset the per-iteration climb signals
+        // before this iteration's model call. Handlers re-record as they fire.
+        if agentic {
+            sess.reset_agentic_climb_for_iteration().await;
+        }
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.
@@ -288,6 +294,23 @@ pub(crate) async fn run_turn(
                     }
                     can_drain_pending_input = !model_needs_follow_up;
                     continue;
+                }
+
+                // Agentic-mode climber guard: the model wants to continue, but
+                // if this iteration produced no net-new state (no declared phase
+                // AND no plan change AND no novel tool call), halt and yield to
+                // the user instead of looping — that is the ralph signature.
+                if agentic && needs_follow_up && !sess.agentic_climb_is_valid_step().await {
+                    sess.send_event(
+                        &turn_context,
+                        EventMsg::Warning(WarningEvent {
+                            message:
+                                "Agentic climber: halting autonomous loop — no net-new state this step (ralph guard)."
+                                    .to_string(),
+                        }),
+                    )
+                    .await;
+                    break;
                 }
 
                 if !needs_follow_up {

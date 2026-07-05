@@ -82,6 +82,7 @@ use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+use codex_protocol::phase_tool::Phase;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
@@ -1198,6 +1199,37 @@ impl Session {
     ) -> HashSet<String> {
         let mut state = self.state.lock().await;
         state.merge_connector_selection(connector_ids)
+    }
+
+    // --- Agentic-mode climber guard -------------------------------------
+    // Only consulted in `ModeKind::Agentic`. Tool handlers write here as they
+    // fire; `run_turn` resets per iteration and reads the climb decision at the
+    // turn boundary to decide continue vs halt-and-yield.
+
+    pub(crate) async fn reset_agentic_climb_for_iteration(&self) {
+        let mut state = self.state.lock().await;
+        state.agentic_climb.reset_for_iteration();
+    }
+
+    pub(crate) async fn record_agentic_phase(&self, phase: Phase) {
+        let mut state = self.state.lock().await;
+        state.agentic_climb.record_phase(phase);
+    }
+
+    pub(crate) async fn record_agentic_plan_change(&self) {
+        let mut state = self.state.lock().await;
+        state.agentic_climb.record_plan_change();
+    }
+
+    /// Record a tool call's (name, args) fingerprint. Returns `true` if novel.
+    pub(crate) async fn record_agentic_call(&self, tool_name: &str, args: &str) -> bool {
+        let mut state = self.state.lock().await;
+        state.agentic_climb.record_call(tool_name, args)
+    }
+
+    pub(crate) async fn agentic_climb_is_valid_step(&self) -> bool {
+        let state = self.state.lock().await;
+        state.agentic_climb.is_valid_climb_step()
     }
 
     // Returns the connector IDs currently selected for this session.
