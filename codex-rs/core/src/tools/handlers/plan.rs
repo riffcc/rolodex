@@ -83,8 +83,8 @@ impl ToolExecutor<ToolInvocation> for PlanHandler {
         }
 
         let args = parse_update_plan_arguments(&arguments)?;
-        // Record plan advancement for the Agentic-mode climber guard.
-        session.record_agentic_plan_change().await;
+        // Record plan advancement for the Auto-mode climber guard.
+        session.record_auto_plan_change().await;
         session
             .send_event(turn.as_ref(), EventMsg::PlanUpdate(args))
             .await;

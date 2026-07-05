@@ -627,7 +627,7 @@ impl ChatWidget {
             ModeKind::Default
             | ModeKind::PairProgramming
             | ModeKind::Execute
-            | ModeKind::Agentic => None,
+            | ModeKind::Auto => None,
         }
     }
 

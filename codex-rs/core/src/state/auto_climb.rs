@@ -1,6 +1,6 @@
-//! The Agentic-mode climber guard brain.
+//! The Auto-mode climber guard brain.
 //!
-//! Decides whether one loop iteration of an Agentic turn was a valid climb
+//! Decides whether one loop iteration of an Auto turn was a valid climb
 //! step (continue the autonomous loop) or a ralph signature (halt and yield to
 //! the user). The invariant: a step is valid iff the agent declared its phase
 //! AND produced net-new state — a plan change or a tool call with a novel
@@ -17,7 +17,7 @@ use std::hash::Hasher;
 use codex_protocol::phase_tool::Phase;
 
 #[derive(Debug, Default)]
-pub(crate) struct AgenticClimbState {
+pub(crate) struct AutoClimbState {
     /// Phase declared in the current iteration. Reset each iteration.
     phase: Option<Phase>,
     /// Whether `update_plan` ran this iteration.
@@ -30,7 +30,7 @@ pub(crate) struct AgenticClimbState {
     seen_call_fingerprints: HashSet<u64>,
 }
 
-impl AgenticClimbState {
+impl AutoClimbState {
     /// Reset the per-iteration signals at the top of each loop iteration.
     pub(crate) fn reset_for_iteration(&mut self) {
         self.phase = None;
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn phase_plus_novel_call_is_valid() {
-        let mut s = AgenticClimbState::default();
+        let mut s = AutoClimbState::default();
         s.reset_for_iteration();
         s.record_phase(Phase::Execute);
         assert!(s.record_call("smart_read", r#"{"path":"a.rs"}"#));
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn phase_plus_plan_change_is_valid() {
-        let mut s = AgenticClimbState::default();
+        let mut s = AutoClimbState::default();
         s.reset_for_iteration();
         s.record_phase(Phase::Reason);
         s.record_plan_change();
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn no_phase_declared_is_ralph() {
-        let mut s = AgenticClimbState::default();
+        let mut s = AutoClimbState::default();
         s.reset_for_iteration();
         s.record_call("smart_read", r#"{"path":"a.rs"}"#);
         assert!(
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn repeated_call_is_ralph() {
-        let mut s = AgenticClimbState::default();
+        let mut s = AutoClimbState::default();
         s.reset_for_iteration();
         s.record_phase(Phase::Explore);
         assert!(s.record_call("smart_read", r#"{"path":"a.rs"}"#));
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn novel_call_after_repeat_is_valid_again() {
-        let mut s = AgenticClimbState::default();
+        let mut s = AutoClimbState::default();
         s.reset_for_iteration();
         s.record_phase(Phase::Explore);
         s.record_call("smart_read", r#"{"path":"a.rs"}"#);
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn reset_clears_per_iteration_signals() {
-        let mut s = AgenticClimbState::default();
+        let mut s = AutoClimbState::default();
         s.record_phase(Phase::Execute);
         s.record_plan_change();
         s.reset_for_iteration();

@@ -78,9 +78,9 @@ impl ToolExecutor<ToolInvocation> for PhaseHandler {
         };
 
         let args = parse_declare_phase_arguments(&arguments)?;
-        // Record the declared phase for the Agentic-mode climber guard. Cheap
-        // and inert outside Agentic mode (the guard only reads it there).
-        session.record_agentic_phase(args.phase.clone()).await;
+        // Record the declared phase for the Auto-mode climber guard. Cheap
+        // and inert outside Auto mode (the guard only reads it there).
+        session.record_auto_phase(args.phase.clone()).await;
         let phase = format!("{:?}", args.phase).to_lowercase();
         session
             .send_event(turn.as_ref(), EventMsg::PhaseDeclared(args))

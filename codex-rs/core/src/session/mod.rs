@@ -1201,35 +1201,35 @@ impl Session {
         state.merge_connector_selection(connector_ids)
     }
 
-    // --- Agentic-mode climber guard -------------------------------------
-    // Only consulted in `ModeKind::Agentic`. Tool handlers write here as they
+    // --- Auto-mode climber guard -------------------------------------
+    // Only consulted in `ModeKind::Auto`. Tool handlers write here as they
     // fire; `run_turn` resets per iteration and reads the climb decision at the
     // turn boundary to decide continue vs halt-and-yield.
 
-    pub(crate) async fn reset_agentic_climb_for_iteration(&self) {
+    pub(crate) async fn reset_auto_climb_for_iteration(&self) {
         let mut state = self.state.lock().await;
-        state.agentic_climb.reset_for_iteration();
+        state.auto_climb.reset_for_iteration();
     }
 
-    pub(crate) async fn record_agentic_phase(&self, phase: Phase) {
+    pub(crate) async fn record_auto_phase(&self, phase: Phase) {
         let mut state = self.state.lock().await;
-        state.agentic_climb.record_phase(phase);
+        state.auto_climb.record_phase(phase);
     }
 
-    pub(crate) async fn record_agentic_plan_change(&self) {
+    pub(crate) async fn record_auto_plan_change(&self) {
         let mut state = self.state.lock().await;
-        state.agentic_climb.record_plan_change();
+        state.auto_climb.record_plan_change();
     }
 
     /// Record a tool call's (name, args) fingerprint. Returns `true` if novel.
-    pub(crate) async fn record_agentic_call(&self, tool_name: &str, args: &str) -> bool {
+    pub(crate) async fn record_auto_call(&self, tool_name: &str, args: &str) -> bool {
         let mut state = self.state.lock().await;
-        state.agentic_climb.record_call(tool_name, args)
+        state.auto_climb.record_call(tool_name, args)
     }
 
-    pub(crate) async fn agentic_climb_is_valid_step(&self) -> bool {
+    pub(crate) async fn auto_climb_is_valid_step(&self) -> bool {
         let state = self.state.lock().await;
-        state.agentic_climb.is_valid_climb_step()
+        state.auto_climb.is_valid_climb_step()
     }
 
     // Returns the connector IDs currently selected for this session.

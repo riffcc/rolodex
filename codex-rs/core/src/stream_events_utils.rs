@@ -429,10 +429,10 @@ pub(crate) async fn handle_output_item_done(
                 payload_preview
             );
 
-            // Fingerprint the (tool_name, args) for the Agentic-mode climber
-            // guard. Inert outside Agentic mode (the guard only reads it there).
+            // Fingerprint the (tool_name, args) for the Auto-mode climber
+            // guard. Inert outside Auto mode (the guard only reads it there).
             ctx.sess
-                .record_agentic_call(&call.tool_name.to_string(), &payload_preview)
+                .record_auto_call(&call.tool_name.to_string(), &payload_preview)
                 .await;
 
             record_completed_response_item(ctx.sess.as_ref(), ctx.turn_context.as_ref(), &item)
