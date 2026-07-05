@@ -47,6 +47,7 @@ use crate::models::WebSearchAction;
 use crate::num_format::format_with_separators;
 use crate::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use crate::parse_command::ParsedCommand;
+use crate::phase_tool::DeclarePhaseArgs;
 use crate::plan_tool::UpdatePlanArgs;
 use crate::request_permissions::RequestPermissionsEvent;
 use crate::request_permissions::RequestPermissionsResponse;
@@ -1306,6 +1307,10 @@ pub enum EventMsg {
     RealtimeConversationListVoicesResponse(RealtimeConversationListVoicesResponseEvent),
 
     PlanUpdate(UpdatePlanArgs),
+
+    /// The agent declared a cognitive phase transition (Auto-mode climber
+    /// signal). Emitted by the `declare_phase` tool handler.
+    PhaseDeclared(DeclarePhaseArgs),
 
     TurnAborted(TurnAbortedEvent),
 
