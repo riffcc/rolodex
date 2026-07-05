@@ -140,6 +140,7 @@ pub fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::McpStartupComplete(_)
         | EventMsg::WebSearchBegin(_)
         | EventMsg::PlanUpdate(_)
+        | EventMsg::PhaseDeclared(_)
         | EventMsg::ShutdownComplete
         | EventMsg::DeprecationNotice(_)
         | EventMsg::ItemStarted(_)
