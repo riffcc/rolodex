@@ -2675,7 +2675,7 @@ dependencies = [
  "indexmap 2.14.0",
  "insta",
  "libc",
- "llm-code-sdk 0.1.0 (git+https://github.com/riffcc/llm-code-sdk.git?rev=3c97b20c7fe2db49dc05ffe33b8a4ae72b9e5de9)",
+ "llm-code-sdk 0.1.0 (git+https://github.com/riffcc/llm-code-sdk.git?rev=0f0fa825f6b821a145fc147d4b063eec75fc73ad)",
  "maplit",
  "once_cell",
  "openssl-sys",
@@ -8762,7 +8762,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lcs-pty"
 version = "0.1.0"
-source = "git+https://github.com/riffcc/llm-code-sdk.git?rev=3c97b20c7fe2db49dc05ffe33b8a4ae72b9e5de9#3c97b20c7fe2db49dc05ffe33b8a4ae72b9e5de9"
+source = "git+https://github.com/riffcc/llm-code-sdk.git?rev=0f0fa825f6b821a145fc147d4b063eec75fc73ad#0f0fa825f6b821a145fc147d4b063eec75fc73ad"
 dependencies = [
  "anyhow",
  "filedescriptor",
@@ -8988,7 +8988,7 @@ dependencies = [
 [[package]]
 name = "llm-code-sdk"
 version = "0.1.0"
-source = "git+https://github.com/riffcc/llm-code-sdk.git?rev=3c97b20c7fe2db49dc05ffe33b8a4ae72b9e5de9#3c97b20c7fe2db49dc05ffe33b8a4ae72b9e5de9"
+source = "git+https://github.com/riffcc/llm-code-sdk.git?rev=0f0fa825f6b821a145fc147d4b063eec75fc73ad#0f0fa825f6b821a145fc147d4b063eec75fc73ad"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
