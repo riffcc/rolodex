@@ -50,7 +50,8 @@ pub fn create_declare_phase_tool() -> ToolSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_protocol::phase_tool::{DeclarePhaseArgs, Phase};
+    use codex_protocol::phase_tool::DeclarePhaseArgs;
+    use codex_protocol::phase_tool::Phase;
 
     #[test]
     fn declare_phase_spec_is_well_formed() {

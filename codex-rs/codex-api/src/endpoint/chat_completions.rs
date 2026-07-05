@@ -278,9 +278,7 @@ fn translate_input_to_chat_messages(
             // the discovered schemas are visible on the next chat turn. The
             // matching assistant tool_call is the FunctionCall rendered above
             // (chat-completions wire flattens ToolSearchCall into a function call).
-            ResponseItem::ToolSearchOutput {
-                call_id, tools, ..
-            } => {
+            ResponseItem::ToolSearchOutput { call_id, tools, .. } => {
                 let content = serde_json::to_string(tools).unwrap_or_else(|_| "[]".to_string());
                 Some(json!({
                     "role": "tool",
@@ -710,7 +708,8 @@ mod tests {
             client_metadata: None,
         };
 
-        let body = translate_responses_request_to_chat_body(request).expect("tool_search translates");
+        let body =
+            translate_responses_request_to_chat_body(request).expect("tool_search translates");
         let tools = body["tools"].as_array().expect("tools array");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["type"], json!("function"));
@@ -720,10 +719,12 @@ mod tests {
             json!(["query"])
         );
         // The discovery description is preserved so the model knows how to use it.
-        assert!(tools[0]["function"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("Tool discovery"));
+        assert!(
+            tools[0]["function"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Tool discovery")
+        );
     }
 
     #[test]
@@ -746,8 +747,8 @@ mod tests {
                 tools: vec![json!({"type":"function","name":"search_drive"})],
             },
         ];
-        let messages = super::translate_input_to_chat_messages("", &input)
-            .expect("input translates");
+        let messages =
+            super::translate_input_to_chat_messages("", &input).expect("input translates");
         let assistant = messages
             .iter()
             .find(|m| m["role"] == "assistant")
@@ -762,10 +763,12 @@ mod tests {
             .find(|m| m["role"] == "tool")
             .expect("tool result message");
         assert_eq!(tool_msg["tool_call_id"], json!("call_1"));
-        assert!(tool_msg["content"]
-            .as_str()
-            .unwrap()
-            .contains("search_drive"));
+        assert!(
+            tool_msg["content"]
+                .as_str()
+                .unwrap()
+                .contains("search_drive")
+        );
     }
 
     #[test]
